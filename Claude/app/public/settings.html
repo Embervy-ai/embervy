@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0B1228">
+  <title data-i18n="settings.pageTitle">Settings</title>
+  <link rel="stylesheet" href="/style.css?v=122">
+  <script src="/strings.js"></script>
+  <script src="/feature-defaults.js"></script>
+  <style>
+    /* Settings page — its own slim layout layer on top of the app CSS. */
+    #settings-wrap {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 16px 20px 64px;
+      height: 100%;
+      overflow-y: auto;
+    }
+    .settings-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      /* The safe-area inset keeps the back arrow tappable below the iPhone status bar. */
+      padding: calc(8px + env(safe-area-inset-top, 0px)) 0 20px;
+      position: sticky;
+      top: 0;
+      background: rgba(11, 18, 40, 0.92);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      z-index: 5;
+    }
+    .settings-header h1 {
+      font-size: 20px;
+      font-weight: 600;
+      color: #EAF0FA;
+      font-family: var(--font);
+    }
+    .back-link {
+      /* Keep the back control visible against the dark header. */
+      color: #EAF0FA;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      text-decoration: none;
+      font-size: 17px;
+      line-height: 1;
+      padding: 8px 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .settings-section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+    .settings-section h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 14px;
+      font-family: var(--font);
+    }
+    .field {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 0;
+      flex-wrap: wrap;
+    }
+    .field label:not(.switch) {
+      font-size: 14px;
+      color: var(--text);
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .field:has(> .switch) { flex-wrap: nowrap; }
+    .field:has(> .switch) > label:not(.switch) { flex: 1 1 0; }
+    .field input[type="color"] {
+      width: 44px;
+      height: 32px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: none;
+      padding: 2px;
+      cursor: pointer;
+    }
+    .field input[type="range"] {
+      flex: 1 1 140px;
+      max-width: 200px;
+      accent-color: var(--accent);
+    }
+    .field select {
+      font-family: var(--font);
+      font-size: 14px;
+      color: var(--text);
+      background: rgba(255,255,255,0.07);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+    }
+    .field input[type="text"] {
+      font-family: var(--font);
+      font-size: 14px;
+      color: var(--text);
+      background: rgba(255,255,255,0.07);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      max-width: 200px;
+    }
+    .field .pct {
+      font-size: 13px;
+      color: var(--text-light);
+      min-width: 38px;
+      text-align: right;
+    }
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .seg button {
+      font-family: var(--font);
+      font-size: 13px;
+      color: var(--text-light);
+      background: none;
+      border: none;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    .seg button.active {
+      background: rgba(212, 169, 72, 0.18);
+      color: var(--accent);
+    }
+    .photo-row { width: 100%; }
+    /* iOS standalone PWA: a display:none file input often silently refuses to
+       open the picker on programmatic click() — visually-hidden instead. */
+    #bg-photo-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
+    .photo-btn {
+      font-family: var(--font);
+      font-size: 13px;
+      color: var(--blue);
+      background: rgba(255,255,255,0.07);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 12px;
+      cursor: pointer;
+    }
+    .hint { font-size: 12px; color: var(--text-light); margin-top: 6px; }
+    .hint.warn { color: #A12A1F; font-weight: 600; }
+    #bg-photo-preview { display: block; max-width: 120px; max-height: 160px; margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; }
+    #bg-photo-preview[hidden] { display: none; }
+    .save-bar {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
+      background: rgba(11, 18, 40, 0.92);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: center;
+    }
+    #save-btn {
+      font-family: var(--font);
+      font-size: 15px;
+      font-weight: 600;
+      color: #FFFFFF;
+      background: var(--accent);
+      border: none;
+      border-radius: 12px;
+      padding: 12px 28px;
+      cursor: pointer;
+      width: 100%;
+      max-width: 600px;
+    }
+    #save-btn:active { background: var(--accent-hover); }
+    #model-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+    #model-buttons button {
+      font-family: var(--font); font-size: 14px; padding: 8px 14px;
+      border-radius: 10px; border: 1px solid var(--border);
+      background: rgba(255,255,255,0.06); color: var(--text); cursor: pointer;
+    }
+    #model-buttons button.active { background: var(--accent); color: #0B1228; border-color: var(--accent); }
+    /* Presets set background, bubbles and title; text follows background luminance. */
+    .theme-field { align-items: flex-start; }
+    .theme-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; flex: 1; }
+    .theme-preset { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 10px;
+      border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);
+      font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+    .theme-preset:hover { background: rgba(255,255,255,0.09); }
+    .theme-preset .swatch { display: flex; height: 22px; border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.10); }
+    .theme-preset .swatch i { flex: 1; }
+    .theme-preset .swatch i:first-child { flex: 2; }
+    .theme-preset.active { border-color: var(--accent); background: rgba(212, 169, 72, 0.16); }
+    .hidden { display: none !important; }
+    .field label.switch {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 24px;
+      flex: 0 0 42px;
+      margin-left: auto;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch .slider {
+      position: absolute; inset: 0;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .switch .slider::before {
+      content: "";
+      position: absolute;
+      height: 18px; width: 18px;
+      left: 2px; top: 2px;
+      background: var(--text-light);
+      border-radius: 50%;
+      transition: transform 0.15s, background 0.15s;
+    }
+    .switch input:checked + .slider { background: rgba(212, 169, 72, 0.35); }
+    .switch input:checked + .slider::before {
+      transform: translateX(18px);
+      background: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <div id="settings-wrap">
+    <div class="settings-header">
+      <a class="back-link" href="/" aria-label="Back" data-i18n-aria-label="settings.backLabel" data-i18n="settings.back">‹ Back</a>
+      <h1 data-i18n="settings.heading">Settings</h1>
+    </div>
+
+    <section class="settings-section hidden" id="approval-settings-section">
+      <h2 data-i18n="approvalSettings.heading">Approvals</h2>
+      <div class="field">
+        <label for="approval-level" data-i18n="approvalSettings.level">Ask before tools act</label>
+        <select id="approval-level" disabled>
+          <option value="all" data-i18n="approvalSettings.all">All changes and sends</option>
+          <option value="important" data-i18n="approvalSettings.important" selected>Important actions (default)</option>
+          <option value="none" data-i18n="approvalSettings.none">None</option>
+        </select>
+      </div>
+      <div class="hint" id="approval-patterns" data-i18n="approvalSettings.patterns">Important actions: destructive deletes, stopping or restarting services, publishing, sending mail from the shell, and writing global settings, system files or credentials.</div>
+      <div class="hint" id="approval-extra"></div>
+      <div class="hint" data-i18n="approvalSettings.reading">Reading, searching and memory lookups do not need a card. Changes save immediately for every device.</div>
+      <div class="hint" id="approval-settings-status" role="status"></div>
+    </section>
+
+    <!-- MODEL (gpt substrate only; hidden elsewhere) -->
+    <div class="settings-section hidden" id="model-section">
+      <h2 data-i18n="settings.model.heading">Model</h2>
+      <div class="field">
+        <label data-i18n="settings.model.label">Which model runs your agent (switches mid-session)</label>
+        <div id="model-buttons">
+          <button data-model="terra" data-i18n="settings.model.terra">Terra (fast)</button>
+          <button data-model="luna" data-i18n="settings.model.luna">Luna (balanced)</button>
+          <button data-model="sol" data-i18n="settings.model.sol">Sol (deep)</button>
+        </div>
+      </div>
+      <div class="hint" id="model-hint"></div>
+    </div>
+
+    <!-- mailbox-write:start -->
+    <section class="settings-section hidden" id="mailbox-write-section">
+      <h2 data-i18n="mailboxWrite.heading">Your mailbox</h2>
+      <div class="field">
+        <label for="mailbox-write-enabled" id="mailbox-write-label" data-i18n="mailboxWrite.label">Let my agent write mail in my name — drafts in my mailbox, and sending after I allow each one</label>
+        <label class="switch">
+          <input type="checkbox" id="mailbox-write-enabled" aria-labelledby="mailbox-write-label">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="hint" data-i18n="mailboxWrite.rootNotice">Your agent has full access to its own server. This switch and every card are an agreement with it, not a lock.</div>
+      <div class="hint" id="mailbox-write-hint" role="status"></div>
+    </section>
+    <!-- mailbox-write:end -->
+
+    <!-- COLOUR SCHEME + BACKGROUND -->
+    <section class="settings-section">
+      <h2 data-i18n="settings.scheme.heading">Colour scheme</h2>
+      <button type="button" class="photo-btn" id="house-look-btn" data-i18n="settings.houseLook">Use the house look</button>
+      <div class="field theme-field">
+        <label data-i18n="settings.scheme.presets">Presets</label>
+        <div id="theme-presets" class="theme-presets" role="group" aria-label="Colour scheme presets" data-i18n-aria-label="settings.scheme.presetsLabel"></div>
+      </div>
+      <div class="hint" data-i18n="settings.scheme.hint">Sets background, bubble and title colours in one go. Adjust anything below afterwards — a preset is a starting point, not a lock.</div>
+    </section>
+
+    <section class="settings-section">
+      <h2 data-i18n="settings.background.heading">Background</h2>
+      <div class="field">
+        <label data-i18n="settings.background.type">Type</label>
+        <div class="seg" id="bg-mode">
+          <button data-mode="color" class="active" data-i18n="settings.background.modeColor">Color</button>
+          <button data-mode="photo" data-i18n="settings.background.modePhoto">Photo</button>
+        </div>
+      </div>
+      <div class="field" id="bg-color-row">
+        <label id="bg-color-label" data-i18n="settings.background.color">Color</label>
+        <input type="color" id="bg-color" value="#0B1228">
+      </div>
+      <div class="field photo-row hidden" id="bg-photo-row">
+        <label data-i18n="settings.background.image">Image</label>
+        <input type="file" id="bg-photo-input" accept="image/*">
+        <button class="photo-btn" id="bg-photo-btn" data-i18n="settings.background.choose">Choose image…</button>
+      </div>
+      <div class="hint" id="bg-photo-hint"></div>
+      <img id="bg-photo-preview" alt="" hidden>
+    </section>
+
+    <section class="settings-section">
+      <h2 data-i18n="settings.text.heading">Text</h2>
+      <div class="field">
+        <label data-i18n="settings.text.color">Text color</label>
+        <input type="color" id="text-color" value="#ECEFF4">
+      </div>
+      <div class="hint" id="text-contrast"></div>
+      <div class="hint" data-i18n="settings.text.hint">Times and hints use it a little fainter.</div>
+    </section>
+
+    <section class="settings-section">
+      <h2 data-i18n="settings.frame.heading">Buttons and frame</h2>
+      <div class="field">
+        <label data-i18n="settings.frame.accent">Buttons</label>
+        <input type="color" id="accent-color" value="#D4A948">
+      </div>
+      <div class="field">
+        <label data-i18n="settings.frame.onAccent">Button text</label>
+        <input type="color" id="on-accent-color" value="#2C2C2C">
+      </div>
+      <div class="hint" id="accent-contrast"></div>
+      <div class="field">
+        <label data-i18n="settings.frame.border">Lines and borders</label>
+        <input type="color" id="border-color" value="#41475A">
+      </div>
+    </section>
+
+    <!-- BUBBLES -->
+    <section class="settings-section">
+      <h2 data-i18n="settings.bubbles.heading">Message bubbles</h2>
+      <div class="field">
+        <label data-i18n="settings.bubbles.mineColor">Mine — color</label>
+        <input type="color" id="user-color" value="#D4A948">
+      </div>
+      <div class="field">
+        <label data-i18n="settings.bubbles.mineOpacity">Mine — opacity</label>
+        <input type="range" id="user-alpha" min="0" max="100" value="20">
+        <span class="pct" id="user-alpha-val">20%</span>
+      </div>
+      <div class="field">
+        <label id="agent-label" data-i18n="settings.bubbles.yoursColor">Yours — color</label>
+        <input type="color" id="agent-color" value="#5A91DC">
+      </div>
+      <div class="field">
+        <label data-i18n="settings.bubbles.yoursOpacity">Yours — opacity</label>
+        <input type="range" id="agent-alpha" min="0" max="100" value="18">
+        <span class="pct" id="agent-alpha-val">18%</span>
+      </div>
+    </section>
+
+    <!-- TITLE -->
+    <section class="settings-section">
+      <h2 data-i18n="settings.titleText.heading">Title</h2>
+      <div class="field">
+        <label data-i18n="settings.titleText.text">Text</label>
+        <input type="text" id="title-text" placeholder="Name" maxlength="24" data-i18n-placeholder="settings.titleText.placeholder">
+      </div>
+      <div class="field">
+        <label data-i18n="settings.titleText.font">Font</label>
+        <select id="title-font">
+          <option value="" data-i18n="settings.titleText.fontHouse">House font</option>
+          <option value='"Snell Roundhand", "Savoye LET", "Segoe Script", "Brush Script MT", cursive' data-i18n="settings.titleText.fontScript">Script</option>
+          <option value='-apple-system, "Segoe UI", system-ui, sans-serif' data-i18n="settings.titleText.fontClean">Clean (sans-serif)</option>
+          <option value='Georgia, "Times New Roman", serif' data-i18n="settings.titleText.fontClassic">Classic (serif)</option>
+          <option value='"Trebuchet MS", "Gill Sans", sans-serif' data-i18n="settings.titleText.fontModern">Modern</option>
+          <option value='"Courier New", monospace' data-i18n="settings.titleText.fontTypewriter">Typewriter</option>
+        </select>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.titleText.color">Color</label>
+        <input type="color" id="title-color" value="#7FB2F0">
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section class="settings-section">
+      <h2 data-i18n="settings.features.heading">Features</h2>
+      <div class="field">
+        <label data-i18n="settings.features.doctor">Embervy Doctor (stack diagnostics)</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-doctor" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.voice">Voice recording (microphone)</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-voice" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.voice.whisper">Whisper for voice input (much better recognition)</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-whisper" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="hint" data-i18n="settings.voice.whisperNote">Free for about 200 minutes of speech a day (Cloudflare's daily Workers AI allowance). On Cloudflare's free plan it never costs anything: past the allowance it pauses until the next day and your browser's own recognition takes over. On the paid Workers plan, speech beyond that costs about $0.0005 per minute. The recording goes to Whisper in your own Cloudflare account and is not stored.</div>
+      <div class="field">
+        <label for="speech-lang" data-i18n="settings.voice.language">Language you speak in</label>
+        <select id="speech-lang">
+          <option value="" data-i18n="settings.voice.sameAsApp">Same as the app</option>
+        </select>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.voice.sendAtOnce">Send spoken text at once (off: it waits in the text field for corrections)</label>
+        <label class="switch">
+          <input type="checkbox" id="speech-send" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.games">Games (Connect Four, Battleships)</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-games" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.notes">Notes (quick notepad)</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-notes" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.terminalPanel">Agent workshop view — watch your agent work (terminal, read-only) &amp; activity indicator</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-terminal-panel" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.terminalInput">Type into the agent's terminal (advanced — normally off)</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-terminal-input">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.photos">Photo upload</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-photos" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.files">File upload</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-files" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label data-i18n="settings.features.push">Push notifications</label>
+        <label class="switch">
+          <input type="checkbox" id="feature-push" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+  </div>
+
+  <div class="save-bar">
+    <button id="save-btn" data-i18n="settings.apply">Apply</button>
+  </div>
+
+  <script src="/legacy-names.js?v=3"></script>
+  <script src="/i18n.js?v=3"></script>
+  <script src="/settings.js?v=114"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "imapflow": "^1.7.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  },
+  "overrides": {
+    "ip-address": "^10.7.4"
+  }
+}

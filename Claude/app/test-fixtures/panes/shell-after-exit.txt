@@ -1,0 +1,2 @@
+root@embervy:/opt/embervy# 
+[loop] claude exited (code 0), restarting in 5s

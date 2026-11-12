@@ -1,0 +1,42 @@
+# rag — long-term transcript archive for an agent.
+#
+# Replace the placeholder values below with your own Cloudflare resources
+# before deploying.
+
+name = "embervy-chronicle"
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "rag-storage"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "rag-vectors"
+
+# D1 database for the FTS5 lexical index (BM25 half of hybrid search).
+# Create it with:  wrangler d1 create rag-fts
+# then run the schema:  wrangler d1 execute rag-fts --file=fts-init.sql
+[[d1_databases]]
+binding = "FTS"
+database_name = "rag-fts"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[ai]
+binding = "AI"
+
+# Optional public route — fill in with your own zone.
+# [[routes]]
+# pattern = "rag.example.com/*"
+# zone_name = "example.com"
+
+# Secrets to set via `wrangler secret put`:
+#   RAG_AUTH_TOKEN  — bearer token required for all non-OPTIONS endpoints.
+#                     The worker fails closed (500) if this is unset.

@@ -1,0 +1,36 @@
+# Embervy Dream Worker — copy to wrangler.toml and fill in your values.
+name = "embervy-dream"
+main = "src/index.ts"
+compatibility_date = "2026-03-17"
+compatibility_flags = ["nodejs_compat"]
+
+# The cron fires hourly; the worker itself checks DREAM_HOUR in
+# DREAM_TIMEZONE and dreams exactly once per night. This keeps DST drift
+# out of the cron expression.
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+AGENT_NAME = "YOUR-AGENT-NAME"
+DREAM_HOUR = "4"
+DREAM_TIMEZONE = "UTC"
+
+# D1: the same database your memory worker uses (dream_notes lives there).
+[[d1_databases]]
+binding = "DB"
+database_name = "embervy-memory"
+database_id = "YOUR-MEMORY-D1-ID"
+
+# Service binding to your RAG worker (same account — public URLs do NOT
+# work worker-to-worker on the same Cloudflare account).
+[[services]]
+binding = "RAG"
+service = "embervy-chronicle"
+
+[observability]
+enabled = true
+
+# Secrets (set via `wrangler secret put`):
+#   OPENROUTER_API_KEY — pays for the nightly dream (one cheap call/night)
+#   RAG_AUTH_TOKEN     — if your rag worker requires auth
+#   DREAM_AUTH_TOKEN   — protects the manual POST /dream endpoint

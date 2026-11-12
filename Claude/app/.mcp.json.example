@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "Example MCP server registration for Claude Code.",
+    "",
+    "Copy this file to one of:",
+    "  - $EMBERVY_HOME/.mcp.json                (project-scoped)",
+    "  - ~/.claude/settings.json under \"mcpServers\" (user-scoped)",
+    "",
+    "Then start Claude Code with:",
+    "  claude --dangerously-load-development-channels server:app",
+    "",
+    "or simply run start-claude-loop.sh, which sets the same flag.",
+    "",
+    "The 'app' name must match EMBERVY_CHANNELS in your .env (default 'app').",
+    "",
+    "The installer also registers the memory worker as 'lore' (type http,",
+    "url <EMBERVY_URL>/mcp, Authorization: Bearer <EMBERVY_API_KEY>) — the agent",
+    "sees its tools as mcp__lore__wake, mcp__lore__find, … (the Lore, its",
+    "working memory; houses from before called the server 'memory').",
+    "",
+    "The script path is absolute on purpose: Claude Code ignores \"cwd\" and",
+    "would look for mcp.ts in the house folder, where it does not exist."
+  ],
+  "mcpServers": {
+    "app": {
+      "command": "bun",
+      "args": ["run", "/opt/embervy/Claude/app/mcp.ts"],
+      "cwd": "/opt/embervy/Claude/app",
+      "env": {
+        "EMBERVY_HOME": "/opt/embervy",
+        "EMBERVY_APP_HOST": "127.0.0.1",
+        "EMBERVY_APP_PORT": "3030",
+        "USER_LABEL": "User",
+        "AGENT_LABEL": "Agent"
+      }
+    }
+  }
+}

@@ -1,0 +1,52 @@
+# Environment files — never commit secrets.
+.env
+.env.local
+.env.*.local
+*.env
+
+# Bun / Node — ignore the dep tree, but commit lockfiles for reproducibility.
+node_modules/
+# Also a node_modules symlink (worktrees link it to a shared install).
+node_modules
+
+# Wrangler.
+.wrangler/
+.dev.vars
+
+# Build / cache.
+dist/
+build/
+.cache/
+
+# State / logs (per-deployment, not source).
+state/
+logs/
+data/
+**/data/inbox.jsonl
+**/data/outbox.jsonl
+**/data/email-inbox.jsonl
+**/data/email-outbox.jsonl
+**/data/push-subscriptions.json
+
+# The app's local translation (Claude/app): written on the installed house by
+# its agent, never shipped, never overwritten by an update. See
+# Claude/app/strings.ts.
+strings.local.json
+
+# Editors / OS.
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local audit notes.
+AUDIT-*.md
+
+# E2E test artifacts — live-run keys and scratch state, never source.
+**/.e2e-run/
+__pycache__/
+
+# The guided installer is a separate product, not part of this repo.
+shared/tools/installer/
+shared/tools/installer-build/

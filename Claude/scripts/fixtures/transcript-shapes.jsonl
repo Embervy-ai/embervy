@@ -1,0 +1,48 @@
+{"type": "attachment", "timestamp": "2026-01-05T10:00:01.000Z"}
+{"type": "queue-operation", "timestamp": "2026-01-05T10:00:02.000Z"}
+{"type": "api-request", "timestamp": "2026-01-05T10:00:03.000Z"}
+{"type": "last-prompt", "timestamp": "2026-01-05T10:00:04.000Z"}
+{"type": "mode", "timestamp": "2026-01-05T10:00:05.000Z"}
+{"type": "permission-mode", "timestamp": "2026-01-05T10:00:06.000Z"}
+{"type": "ai-title", "timestamp": "2026-01-05T10:00:07.000Z"}
+{"type": "file-history-snapshot", "timestamp": "2026-01-05T10:00:08.000Z"}
+{"type": "atis-latch", "timestamp": "2026-01-05T10:00:09.000Z"}
+{"type": "system", "subtype": "turn_duration", "timestamp": "2026-01-05T10:00:10.000Z", "isMeta": false}
+{"type": "system", "subtype": "stop_hook_summary", "timestamp": "2026-01-05T10:00:11.000Z"}
+{"type": "api-request-blob", "message": {"role": "user", "content": "<channel source=\"app\" user=\"Person\" message_id=\"m11\" ts=\"t\">blob copy token-01</channel>"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:12.000Z", "message": {"role": "user", "content": "[silent] [gateway:cache-ping] keep warm token-02"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:13.000Z", "message": {"role": "user", "content": "[gateway] first prompt of a life token-03"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:14.000Z", "message": {"role": "user", "content": "<channel source=\"app\" user=\"Person\" message_id=\"m13\" ts=\"t\">person words token-04</channel>"}, "isMeta": true}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:15.000Z", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "private thought token-05"}, {"type": "text", "text": "terminal prose token-06"}, {"type": "tool_use", "id": "r1", "name": "mcp__app__reply", "input": {"text": "reply words token-07"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:16.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r1", "content": [{"type": "text", "text": "Sent: reply words token-07"}]}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:17.000Z", "message": {"role": "user", "content": "<channel source=\"app\" kind=\"room\" room=\"Hall\" from=\"Rowan\" message_id=\"m16\" ts=\"t\">[Hall/Rowan] room words token-08</channel>"}, "isMeta": true}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:18.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "o1", "name": "mcp__app__room", "input": {"text": "room answer token-09"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:19.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "o1", "content": [{"type": "text", "text": "Sent to Hall (id 1)"}], "is_error": false}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:20.000Z", "message": {"role": "user", "content": "<channel source=\"app\" kind=\"scheduled\" from=\"house\" message_id=\"m19\" ts=\"t\">[gateway:moment] moment words token-10</channel>"}, "isMeta": true}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:21.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "moment answer kept in terminal token-11"}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:22.000Z", "message": {"role": "user", "content": "<channel source=\"app\" user=\"Person\" message_id=\"m21\" ts=\"t\">[Heart] on: \"earlier words\" token-12</channel>"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:23.000Z", "message": {"role": "user", "content": "<channel source=\"app\" user=\"Person\" file_name=\"a.jpg\" image_path=\"/tmp/a.jpg\" message_id=\"m22\" ts=\"t\">[Image] caption token-13</channel>"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:24.000Z", "message": {"role": "user", "content": "[Image: original 1600x1200, displayed at 800x600] token-14"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:25.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "meta blocks token-15"}]}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:26.000Z", "message": {"role": "user", "content": "<channel source=\"app\" user=\"Person\" message_id=\"m25\" ts=\"t\">[Voice message] spoken words token-16</channel>"}, "isMeta": true}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:27.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "v1", "name": "mcp__app__voice_reply", "input": {"text": "spoken answer token-17"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:28.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "v1", "content": [{"type": "text", "text": "Sent voice: spoken answer token-17"}]}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:29.000Z", "message": {"role": "user", "content": "<task-notification><status>completed</status><summary>background job done token-18</summary></task-notification>"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:30.000Z", "message": {"role": "user", "content": "typed in the terminal token-19"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:31.000Z", "message": {"role": "user", "content": "<system-reminder>reminder token-20</system-reminder>"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:32.000Z", "message": {"role": "user", "content": "Claude usage limit reached token-21"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:33.000Z", "message": {"role": "user", "content": "meta plain token-22"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:34.000Z", "message": {"role": "user", "content": "<channel source=\"app\" message_id=\"m33\" ts=\"t\">[Direct/Peer] direct words token-23</channel>"}, "isMeta": true}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:35.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p1", "name": "mcp__app__peer", "input": {"to": "Peer", "text": "peer answer token-24"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:36.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p1", "content": [{"type": "text", "text": "[Direct to Peer] id=peer-1"}]}]}}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:37.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "f1", "name": "mcp__app__reply", "input": {"text": "failed reply token-25"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:38.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "f1", "content": [{"type": "text", "text": "NOT delivered \u2014 the user has not received this message: no answer from the app within 10s."}], "is_error": true}]}}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:39.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "echo tool token-26"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:40.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "b1", "content": [{"type": "text", "text": "tool token-26 output"}], "is_error": false}]}}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:41.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "s1", "name": "mcp__app__send", "input": {"text": "send words token-27"}}]}}
+{"type": "user", "timestamp": "2026-01-05T10:00:42.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "s1", "content": [{"type": "text", "text": "Sent: send words token-27"}]}]}}
+{"type": "assistant", "timestamp": "2026-01-05T10:00:43.000Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "x1", "name": "mcp__app__reply", "input": {"text": "subagent reply token-28"}}]}, "isSidechain": true}
+{"type": "user", "timestamp": "2026-01-05T10:00:44.000Z", "message": {"role": "user", "content": "[Request interrupted by user for tool use]"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:45.000Z", "message": {"role": "user", "content": "Stop hook feedback: internal diagnostic token-29"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:59.000Z", "isMeta": true, "message": {"role": "user", "content": "<channel source=\"app\" message_id=\"m99\" ts=\"t\">[Lounge/Kim] older room format token-31</channel>"}}
+{"type": "user", "timestamp": "2026-01-05T10:00:46.000Z", "message": {"role": "user", "content": "<channel source=\"app\" user=\"Person\" message_id=\"m45\" ts=\"t\">last words token-30</channel>"}, "isMeta": true}

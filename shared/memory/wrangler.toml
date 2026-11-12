@@ -1,0 +1,69 @@
+# Embervy memory worker — episodic memory for an agent.
+#
+# Replace the placeholder values below with your own Cloudflare account
+# resources before deploying:
+#   account_id      — your Cloudflare account ID
+#   database_id     — the D1 database ID created via `wrangler d1 create embervy-memory`
+#   pattern         — the route you want to expose, in your own zone
+#   PUBLIC_URL      — the public URL of this worker once deployed
+#   APP_URL         — the public URL of your app/tunnel (if any)
+#   VIDEO_BACKEND_URL — your video service public URL (if you wire watch/listen);
+#                       left empty, watch/listen/see_video are not offered
+
+name = "embervy-memory"
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+main = "src/index.ts"
+compatibility_date = "2026-03-17"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# Cron triggers:
+#   01 UTC — nightly meta-cognition daemon
+#   (the dream worker runs as its own project / cron, not from here)
+[triggers]
+crons = ["0 1 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "embervy-memory"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[[vectorize]]
+binding = "VECTORS"
+index_name = "embervy-vectors"
+
+[ai]
+binding = "AI"
+
+# Workers Logs off: the stored logs keep every request URL, and a client
+# using the /mcp/<token> form has the key in its URL. `wrangler tail` (live,
+# nothing stored) works either way. Switch it on only for a debugging session.
+[observability]
+enabled = false
+
+# Optional service binding to your RAG worker (same Cloudflare account).
+# Comment out if you don't run a paired RAG.
+# [[services]]
+# binding = "RAG"
+# service = "embervy-chronicle"
+
+[[r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "embervy-archive"
+
+# Public route — fill in with your own zone.
+# [[routes]]
+# pattern = "memory.example.com/*"
+# zone_name = "example.com"
+
+[vars]
+PUBLIC_URL = "https://embervy-memory.YOUR-ACCOUNT.workers.dev"
+APP_URL = "https://YOUR-APP.example.com"
+VIDEO_BACKEND_URL = ""
+
+# Secrets to set via `wrangler secret put`:
+#   OPENROUTER_API_KEY   — for the nightly daemon (any OpenAI-compatible LLM endpoint)
+#   APP_PUSH_TOKEN   — bearer token for /api/external/broadcast on your app
+#   RAG_AUTH_TOKEN   — bearer token for the RAG worker (REQUIRED — fails closed without it)
+#   EMBERVY_API_KEY  — bearer token guarding this worker's own endpoints
+#   BFL_API_KEY      — optional, primary image generator (Flux Pro)

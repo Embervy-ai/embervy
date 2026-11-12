@@ -1,0 +1,16 @@
+{
+  "name": "rag",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Long-term transcript archive for an agent. Stores and searches full chat transcripts (Markdown), surfaced via /upload + /search + /list.",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240314.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.50.0"
+  }
+}

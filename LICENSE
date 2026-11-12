@@ -1,0 +1,113 @@
+Embervy — Dual License
+
+Copyright (c) 2026 Andrea Otto.
+
+This software is offered under two licenses; you may choose either, but
+not both at once.
+
+This license covers the code in this repository. The Embervy Quickstart
+(the guided installer and the add-on packages) is a separate product sold
+under its own terms.
+
+
+------------------------------------------------------------
+1. PERSONAL / NON-COMMERCIAL LICENSE
+------------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to use, copy, modify, merge, publish, and distribute the
+Software for personal, educational, research, and other non-commercial
+purposes, subject to the following conditions:
+
+  - The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+  - The Software is provided "as is", without warranty of any kind,
+    express or implied, including but not limited to the warranties of
+    merchantability, fitness for a particular purpose and
+    non-infringement. In no event shall the authors or copyright holders
+    be liable for any claim, damages, or other liability, whether in an
+    action of contract, tort, or otherwise, arising from, out of, or in
+    connection with the Software or the use or other dealings in the
+    Software.
+
+"Non-commercial" means: not used as part of a paid product or service,
+not used to generate revenue (directly or indirectly), and not deployed
+inside a commercial organization for production purposes.
+
+
+------------------------------------------------------------
+2. COMMERCIAL LICENSE
+------------------------------------------------------------
+
+Any use of the Software that is not permitted under the Personal /
+Non-Commercial License above requires a separate commercial license from
+the copyright holder.
+
+Examples of commercial use that require a commercial license include
+(but are not limited to):
+
+  - Embedding the Software, in whole or in part, in a paid product.
+  - Operating the Software as part of a paid hosted service.
+  - Deploying the Software inside a commercial organization for
+    production purposes.
+
+Business license per house. Deploying the Software inside a commercial
+organization for its own use is licensed per house (one installation of
+the Software with one agent) for a monthly or yearly fee. The license
+covers the licensed houses for the time it is paid, including the updates
+released in that time. The current price and what it includes are published
+at https://embervy.ai/business.
+
+Continuity. If the copyright holder publicly announces the end of
+development, or publishes no release for twelve consecutive months, every
+business license that was paid at that moment becomes perpetual and
+irrevocable for the licensed houses and for all versions released until
+then. No further fee is owed for them.
+
+Evaluation. Trying the Software inside a commercial organization, one
+house for up to 30 days, is not production use and needs no license.
+
+Embedding the Software, in whole or in part, in a product of your own,
+operating it as part of a paid hosted service, and more than ten houses
+are licensed by separate agreement.
+
+To obtain a commercial license, write to info@embervy.ai.
+
+
+------------------------------------------------------------
+3. CONTRIBUTIONS
+------------------------------------------------------------
+
+By submitting a contribution to this repository (code, documentation,
+or any other material, for example through a pull request), you agree
+that:
+
+  - The contribution is your own original work, or you otherwise have
+    the right to submit it under these terms.
+
+  - You grant the copyright holder a perpetual, worldwide,
+    non-exclusive, royalty-free, irrevocable license to use, copy,
+    modify, publish, distribute and sublicense your contribution, under
+    the Personal / Non-Commercial License above, under commercial
+    licenses, and under any future license of the Software.
+
+  - You keep the copyright in your contribution and may use it
+    elsewhere as you wish.
+
+  - Your contribution is provided "as is", without warranty of any
+    kind.
+
+If an AI agent prepared the contribution, the person who submits it
+makes these promises for it.
+
+If you do not agree, please do not submit a contribution. Ideas,
+issues and discussions are always welcome without these terms.
+
+
+------------------------------------------------------------
+SPDX
+------------------------------------------------------------
+
+SPDX-License-Identifier: LicenseRef-Embervy-Dual

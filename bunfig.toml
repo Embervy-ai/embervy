@@ -1,0 +1,3 @@
+[test]
+# App tests must not read the house's own translations, also when run from the repository root.
+preload = ["./Claude/app/test-env.ts"]

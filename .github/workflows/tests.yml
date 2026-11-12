@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # Several runtime tests drive a real tmux session.
+      - name: System packages
+        run: sudo apt-get update -q && sudo apt-get install -y -q tmux
+
+      - name: Install dependencies
+        run: |
+          for dir in Claude/app shared/mail shared/memory shared/rag; do
+            (cd "$dir" && bun install --frozen-lockfile)
+          done
+
+      - name: Brain
+        working-directory: Brain
+        run: bun test
+
+      - name: App
+        working-directory: Claude/app
+        run: bun test
+
+      - name: Claude Code scripts
+        working-directory: Claude/scripts
+        run: bun test
+
+      - name: Shared (memory, archive, mail, calendar, tools, scripts)
+        working-directory: shared
+        run: bun test

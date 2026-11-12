@@ -1,0 +1,32 @@
+{
+  "name": "embervy-app",
+  "version": "0.2.0",
+  "private": true,
+  "description": "App layer for Claude Code: HTTP/WebSocket server (PWA backend) + MCP stdio bridge with channel capability.",
+  "main": "server.ts",
+  "scripts": {
+    "start": "bun run server.ts",
+    "dev": "bun --hot run server.ts",
+    "mcp": "bun run mcp.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "hono": "^4.12.21",
+    "web-push": "^3.6.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/web-push": "^3.6.4",
+    "typescript": "^5.4.0"
+  },
+  "overrides": {
+    "@hono/node-server": "^1.19.17",
+    "body-parser": "^2.4.0",
+    "fast-uri": "^3.1.9",
+    "hono": "^4.12.21",
+    "ip-address": "^10.7.4",
+    "proxy-addr": "^2.0.8",
+    "qs": "^6.16.1",
+    "zod": "^4.6.6"
+  }
+}
