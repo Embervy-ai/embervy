@@ -173,6 +173,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
 const approvalPatternSchema = { type: "object" as const, properties: { label: { type: "string" }, tool: { type: "string" }, field: { type: "string" }, pattern: { type: "string" } }, required: ["label", "tool", "field", "pattern"], additionalProperties: false };
 const BASE_TOOLS = [
     {
+      name: "add_to_kept",
+      description: S("kept.tool"),
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: { type: "string", maxLength: 20000 },
+          said_at: { type: "string", description: "Original message date and time in ISO 8601 with timezone." },
+          speaker: { type: "string", enum: ["person", "agent"] },
+        },
+        required: ["text", "said_at", "speaker"], additionalProperties: false,
+      },
+    },
+    {
       name: "approval_settings",
       description: S("approvalSettings.tool"),
       inputSchema: { type: "object" as const, properties: { level: { type: "string", enum: ["all", "important", "none"] }, add: { type: "array", items: approvalPatternSchema }, remove: { type: "array", items: approvalPatternSchema }, reason: { type: "string" } }, required: ["reason"], additionalProperties: false },
@@ -279,6 +292,18 @@ const BASE_TOOLS = [
 
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  if (name === "add_to_kept") {
+    try {
+      const response = await fetch(`${APP_BASE}/api/internal/keep`, {
+        method: "POST", headers: internalAuthHeaders(),
+        body: JSON.stringify({ text: args?.text, said_at: args?.said_at, speaker: args?.speaker }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = await response.json();
+      return { ...(response.ok ? {} : { isError: true }), content: [{ type: "text", text: response.ok ? S("kept.saved") : data.error || S("kept.storage") }] };
+    } catch { return { isError: true, content: [{ type: "text", text: S("kept.unreachable") }] }; }
+  }
 
   if (name === "approval_settings") {
     try {

@@ -10,7 +10,7 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="icon" href="/embervy-favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/style.css?v=122">
+  <link rel="stylesheet" href="/style.css?v=130">
   <script src="/strings.js"></script>
   <script src="/feature-defaults.js"></script>
 </head>
@@ -42,6 +42,11 @@
       <button id="games-btn" aria-label="Games" title="Games" data-i18n-aria-label="games.title" data-i18n-title="games.title" aria-controls="game-panel">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="13" rx="5"/><path d="M6 12h4m-2-2v4m7-2h.01m3 2h.01"/></svg>
       </button>
+      <button id="kept-btn" type="button" aria-label="Kept" title="Kept" data-i18n-aria-label="kept.title" data-i18n-title="kept.title" aria-haspopup="dialog" aria-controls="kept-dialog">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 2h14v20l-7-5-7 5z"/>
+        </svg>
+      </button>
       <button id="notes-btn" aria-label="Notes" title="Notes" data-i18n-aria-label="header.notes" data-i18n-title="header.notes">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -52,6 +57,15 @@
       </button>
       <span id="window-pct" title="Context window of this session (share until the cut)" data-i18n-title="header.window.title" hidden>–%</span>
     </header>
+
+    <dialog id="kept-dialog" aria-labelledby="kept-title">
+      <div class="kept-header">
+        <h2 id="kept-title" data-i18n="kept.title">Kept</h2>
+        <button id="kept-close" type="button" data-i18n="kept.close">Close</button>
+      </div>
+      <p id="kept-status" role="status"></p>
+      <div id="kept-body"></div>
+    </dialog>
 
     <div id="notes-overlay" class="notes-overlay" hidden>
       <div class="notes-panel">
@@ -200,6 +214,6 @@
   <script src="/legacy-names.js?v=3"></script>
   <script src="/i18n.js?v=3"></script>
   <script src="/games.js?v=1"></script>
-  <script src="/app.js?v=138"></script>
+  <script src="/app.js?v=147"></script>
 </body>
 </html>

@@ -75,6 +75,19 @@ With it set, pipe heads run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, so
 Claude Code's own memory no longer loads beside it. `BRAIN_NOTES_MAX_BYTES`
 caps the index (default 25000). Unset, nothing changes.
 
+**Skills.** API heads get a `## Skills` index from
+`BRAIN_CLAUDE_CWD/.claude/skills` (absolute paths only), or from
+`BRAIN_SKILLS_DIR` when set to an absolute path. Brain rereads each direct
+subdirectory's `SKILL.md` frontmatter at every API prompt construction;
+the head reads the full file before using a skill, with `read_file` when
+`BRAIN_WORKSPACE_READ` covers the directory, and can write new ones as
+their own folders with `name` and `description` frontmatter when the
+write allowlist covers `.claude/skills`. Only the
+first 8000 bytes are read, descriptions stop at 400 characters, and
+`BRAIN_SKILLS_MAX_BYTES` caps the whole section at 12000 bytes by default.
+Missing or empty directories add nothing. Pipe heads keep Claude Code's
+own skill list; Brain neither duplicates it nor runs or changes a skill.
+
 **Env loading.** Brain reads `BRAIN_ENV_FILE` if set, otherwise `Brain/brain.env`
 and then `Brain/.env`, then `BRAIN_EXTRA_ENV_FILE` and the keys listed in
 `BRAIN_IMPORT_ENV_KEYS` from `BRAIN_IMPORT_ENV_FILE`. A nonblank process value
@@ -327,6 +340,8 @@ scripts' own knobs, and internals.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `BRAIN_SKILLS_DIR` | `<BRAIN_CLAUDE_CWD>/.claude/skills` | Absolute skills directory for API heads; a relative override is ignored. Without an absolute override or working directory, no index is added. |
+| `BRAIN_SKILLS_MAX_BYTES` | `12000` | Whole skills section byte cap, including instructions and truncation notice. Invalid values use the default; if even the instructions and notice cannot fit, omit the section. |
 | `BRAIN_INLET_PERSIST` | `true` | Keep each inlet block attached to its user message in later requests (stable prefix, prompt cache holds). |
 | `BRAIN_APP_USER` | `BRAIN_USER_NAME` | Speaker name for app messages. |
 | `BRAIN_APP_POLL_MS` | `2000` | Poll interval of the app inbox. |

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readAssetStamp, readAssetUrl, readCacheNumber } from "./test-asset-stamps";
 
 const source = readFileSync(join(import.meta.dir, "public/app.js"), "utf8");
 
@@ -110,10 +111,10 @@ describe("app restart menu", () => {
   test("the client and worker share the raised asset version", () => {
     const index = readFileSync(join(import.meta.dir, "public/index.html"), "utf8");
     const worker = readFileSync(join(import.meta.dir, "public/sw.js"), "utf8");
-    const version = index.match(/app\.js\?v=(\d+)/)?.[1];
-    expect(Number(version)).toBeGreaterThan(128);
-    expect(worker).toContain(`/app.js?v=${version}`);
-    expect(Number(worker.match(/embervy-v(\d+)/)?.[1])).toBeGreaterThan(44);
+    const version = readAssetStamp(index, "app.js");
+    expect(version).toBeGreaterThan(128);
+    expect(readAssetUrl(worker, "app.js")).toBe(readAssetUrl(index, "app.js"));
+    expect(readCacheNumber(worker)).toBeGreaterThan(44);
   });
 
   test("the complete client script parses", () => {

@@ -645,10 +645,10 @@
     const quote = ev.target instanceof Element ? ev.target.closest(".msg-quote[data-jump]") : null;
     if (quote && quote.dataset.jump) window.jumpToMessage(quote.dataset.jump);
   });
-  messagesEl.addEventListener("click", (ev) => {
+  document.addEventListener("click", (ev) => {
     const btn = ev.target instanceof Element ? ev.target.closest(".copybox-btn") : null;
-    if (!btn) return;
-    const text = btn.parentElement?.querySelector("pre")?.innerText ?? "";
+    if (!btn || !btn.closest("#messages, #kept-dialog")) return;
+    const text = btn.parentElement?._copyText ?? btn.parentElement?.querySelector("pre")?.innerText ?? "";
     const done = (ok) => {
       btn.textContent = ok ? t("chat.copybox.copied") : t("chat.copybox.failed");
       btn.classList.toggle("done", ok);
@@ -658,7 +658,7 @@
     const fallback = () => {
       const area = document.createElement("textarea");
       area.value = text; area.setAttribute("readonly", ""); area.style.cssText = "position:fixed;top:-1000px;opacity:0";
-      document.body.appendChild(area); area.select();
+      (btn.closest("dialog") || document.body).appendChild(area); area.select();
       let ok = false; try { ok = document.execCommand("copy"); } catch {}
       area.remove(); done(ok);
     };
@@ -1032,40 +1032,131 @@
   let houseQuestionVersion = 0;
   let houseQuestionBusy = false;
   function renderHouseQuestionCard(question, submitted) {
-    const actions = question.readonly === true ? "" : question.enter === true && question.options.length === 0
+    const detail = renderHouseQuestionDetail(question);
+    // Only the structured presentation adopts approval actions; fallback cards stay unchanged.
+    const structured = detail.startsWith('<div class="house-permission-detail">');
+    const actions = question.closed === true || question.readonly === true ? "" : question.enter === true && question.options.length === 0
       ? `<button type="button" data-house-enter="true"${submitted ? " disabled" : ""}>${escapeHtml(t("houseQuestion.continue"))}</button>`
-      : question.options.map(option => `<button type="button" data-house-number="${option.number}"${submitted ? " disabled" : ""}>${escapeHtml(option.label)}</button>`).join("");
-    return `<div class="approval-card house-question-card" data-house-question="${escapeAttr(question.id)}">` +
-      `<div class="approval-head">${escapeHtml(t("houseQuestion.heading"))}</div>` +
-      `<pre class="approval-detail">${escapeHtml(question.text)}</pre>` +
-      (question.readonly === true ? "" : `<div class="approval-title">${escapeHtml(t("houseQuestion.terminal"))}</div>`) +
+      : question.options.map((option, index) => {
+        const role = structured ? (index === 0 ? "approval-allow" : index === question.options.length - 1 ? "approval-deny" : "") : "";
+        return `<button type="button"${role ? ` class="${role}"` : ""} data-house-number="${option.number}"${submitted ? " disabled" : ""}>${escapeHtml(option.label)}</button>`;
+      }).join("");
+    const expires = Math.min(question.expiresAt || Infinity, question.deadlineAt || Infinity);
+    const status = question.closed === true
+      ? (question.answerLabel ? t("houseQuestion.answered", { answer: question.answerLabel }) : t("houseQuestion.unanswered"))
+      : question.readonly === true ? t("houseQuestion.waiting") : submitted ? t("houseQuestion.submitted") : structured && actions ? "" : t("houseQuestion.pending");
+    return `<div class="approval-card house-question-card${structured ? " house-permission-card" : ""}" data-house-question="${escapeAttr(question.id)}"${question.closed ? ` data-house-history="${escapeAttr(question.instance)}"` : ""}${question.instance ? ` data-house-instance="${escapeAttr(question.instance)}"` : ""}${Number.isFinite(expires) ? ` data-house-expires="${expires}"` : ""}>` +
+      `<div class="approval-head">🔒 ${escapeHtml(t("houseQuestion.heading"))}</div>` +
+      detail +
+      (question.closed || question.readonly === true ? "" : `<div class="${structured ? "house-permission-hint" : "approval-title"}">${escapeHtml(t("houseQuestion.terminal"))}</div>`) +
+      (!question.closed && question.deadlineAt ? `<div class="${structured ? "house-permission-deadline" : "approval-title"}" data-house-deadline="${Number(question.deadlineAt)}">${escapeHtml(houseQuestionTime(question.deadlineAt))}</div>` : "") +
       `<div class="approval-actions">${actions}</div>` +
-      `<div class="approval-status" role="status">${escapeHtml(question.readonly === true ? t("houseQuestion.waiting") : submitted ? t("houseQuestion.submitted") : t("houseQuestion.pending"))}</div></div>`;
+      `<div class="approval-status" role="status">${escapeHtml(status)}</div></div>`;
+  }
+  const HOUSE_DEADLINE_NOTICE = "⚠ Claude Code will automatically block this request at the deadline, to avoid holding up an unattended session";
+  function renderHouseQuestionDetail(question) {
+    const fallback = () => `<pre class="approval-detail">${escapeHtml(question.text)}</pre>`;
+    if (question.permission !== true || question.readonly === true || question.enter === true) return fallback();
+    const paragraphs = question.text.replace(/\r\n?/g, "\n").split(/\n[ \t]*\n/);
+    if (paragraphs.length < 3 || !paragraphs[0].trim() || !paragraphs[1].trim()) return fallback();
+    const answers = new Set(question.options.map(option => `${option.number}. ${option.label}`));
+    // Only exact answer lines are redundant. Unknown trailing text makes the whole card fall back.
+    const tail = paragraphs.slice(2).map(paragraph => paragraph.split("\n").filter(line => !answers.has(line)))
+      .filter(lines => lines.some(line => line.trim()));
+    const last = tail[tail.length - 1];
+    if (!last || last[last.length - 1] !== "Do you want to proceed?") return fallback();
+    const prompt = last.pop();
+    const [eyebrow, ...description] = paragraphs[0].split("\n");
+    if (!eyebrow.trim()) return fallback();
+    const text = (className, lines) => `<p class="${className}">${escapeHtml(lines.join(" "))}</p>`;
+    let html = description.length ? text("house-permission-eyebrow", [eyebrow]) : "";
+    html += text("approval-title", description.length ? description : [eyebrow]);
+    html += `<pre class="approval-detail">${escapeHtml(paragraphs[1])}</pre>`;
+    for (const lines of tail) {
+      let group = [];
+      const flush = () => {
+        // The card's own deadline line says the same as Claude Code's deadline notice; show it once.
+        const repeatsDeadline = question.deadlineAt && group.join(" ") === HOUSE_DEADLINE_NOTICE;
+        if (group.length && !repeatsDeadline) html += text(group[0].startsWith("⚠") ? "house-permission-warning" : "house-permission-context", group);
+        group = [];
+      };
+      for (const line of lines) {
+        if (line.startsWith("⚠")) flush();
+        group.push(line);
+      }
+      flush();
+    }
+    return `<div class="house-permission-detail">${html}${text("house-permission-prompt", [prompt])}</div>`;
+  }
+  function houseQuestionTime(deadline) {
+    const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    return t("houseQuestion.deadline", { time: `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` });
   }
   function updateHouseQuestion(question, submitted) {
-    const card = messagesEl.querySelector("[data-house-question]");
-    if (!question) { if (card) card.remove(); return; }
-    const html = renderHouseQuestionCard(question, submitted || houseQuestionBusy);
-    if (card) card.outerHTML = html;
-    else {
-      messagesEl.insertAdjacentHTML("beforeend", html);
-      scrollToBottom();
+    const card = messagesEl.querySelector("[data-house-question]:not([data-house-history])");
+    const current = card?.closest(".message");
+    const wasAtBottom = atBottom();
+    if (!question) {
+      if (current) { current.remove(); scrollToBottom(wasAtBottom); }
+      return;
     }
+    const same = card && card.dataset.houseQuestion === question.id && (card.dataset.houseInstance || "") === (question.instance || "");
+    const firstSeen = same ? Number(current.dataset.houseFirstSeen) : Date.now();
+    const bubble = createMessageBubble("assistant", renderHouseQuestionCard(question, submitted || houseQuestionBusy), firstSeen);
+    bubble.dataset.houseFirstSeen = String(firstSeen);
+    // House questions share the shell, not message IDs, reactions or menu listeners.
+    if (same) current.innerHTML = bubble.innerHTML;
+    else {
+      current?.remove();
+      messagesEl.appendChild(bubble);
+    }
+    scrollToBottom(wasAtBottom);
   }
+  function updateHouseQuestionHistory(history) {
+    const wasAtBottom = atBottom();
+    let changed = false;
+    for (const question of history) {
+      if (!question.closed || Array.from(messagesEl.querySelectorAll("[data-house-history]")).some(card =>
+        card.dataset.houseQuestion === question.id && (card.dataset.houseInstance || "") === (question.instance || ""))) continue;
+      // History currently need not contain a timestamp. Never derive one from its expiry.
+      const ts = question.ts && Number.isFinite(new Date(question.ts).getTime()) ? question.ts : null;
+      const bubble = createMessageBubble("assistant", renderHouseQuestionCard(question, true), ts);
+      const active = messagesEl.querySelector("[data-house-question]:not([data-house-history])");
+      const current = active?.closest(".message");
+      if (active && active.dataset.houseQuestion === question.id && (active.dataset.houseInstance || "") === (question.instance || "")) current.replaceWith(bubble);
+      else if (current) current.before(bubble);
+      else messagesEl.appendChild(bubble);
+      changed = true;
+    }
+    if (changed) scrollToBottom(wasAtBottom);
+  }
+  setInterval(() => {
+    messagesEl.querySelectorAll("[data-house-deadline]").forEach(item => {
+      const deadline = Number(item.dataset.houseDeadline);
+      item.textContent = houseQuestionTime(deadline);
+      if (deadline <= Date.now()) item.closest("[data-house-question]").querySelectorAll("button").forEach(button => { button.disabled = true; });
+    });
+  }, 1000);
   async function refreshHouseQuestion() {
     const version = ++houseQuestionVersion;
     try {
       const res = await fetch("/api/house-question", { credentials: "same-origin", cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
-      if (version === houseQuestionVersion) updateHouseQuestion(data.question, data.submitted);
+      if (version === houseQuestionVersion) {
+        // Close in place before removing or replacing the open question.
+        updateHouseQuestionHistory(data.history || []);
+        updateHouseQuestion(data.question, data.submitted);
+      }
     } catch {}
   }
   messagesEl.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-house-number], button[data-house-enter]");
     if (!button || button.disabled || houseQuestionBusy) return;
     const card = button.closest("[data-house-question]");
-    if (!card) return;
+    if (!card || "houseHistory" in card.dataset) return;
+    if (Number(card.dataset.houseExpires) <= Date.now()) { await refreshHouseQuestion(); return; }
+    const identity = { id: card.dataset.houseQuestion, ...(card.dataset.houseInstance ? { instance: card.dataset.houseInstance } : {}) };
     houseQuestionBusy = true;
     ++houseQuestionVersion;
     card.querySelectorAll("button").forEach(item => { item.disabled = true; });
@@ -1073,8 +1164,8 @@
       const res = await fetch("/api/house-question/answer", {
         method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(button.dataset.houseEnter === "true"
-          ? { id: card.dataset.houseQuestion, enter: true }
-          : { id: card.dataset.houseQuestion, number: Number(button.dataset.houseNumber) })
+          ? { ...identity, enter: true }
+          : { ...identity, number: Number(button.dataset.houseNumber) })
       });
       if (!res.ok && res.status !== 409) throw new Error();
       houseQuestionBusy = false;
@@ -1213,6 +1304,15 @@
     } finally { buttons.forEach(btn => { btn.disabled = false; }); }
   });
 
+  // Shared visual shell only. Message-only actions are attached by addMessage below.
+  function createMessageBubble(role, content, ts) {
+    const div = document.createElement("div");
+    div.className = `message ${role}`;
+    const time = ts ? formatTime(ts) : "";
+    div.innerHTML = `${content}${time ? `<span class="time">${escapeHtml(time)}</span>` : ""}`;
+    return div;
+  }
+
   function addMessage(role, text, ts, id, imageUrl, audioUrl, duration, replyMeta, approvalMeta) {
     if (approvalMeta?.source === "email") role = "email";
     if (id && messageIds.has(id)) return;
@@ -1230,22 +1330,20 @@
 
     if (role === "assistant") { showTyping(false); if (workingEl) workingEl.hidden = true; }
 
-    const div = document.createElement("div");
-    div.className = `message ${role}`;
-
     let content = role === "assistant" || role === "user" ? renderMarkdown(text) : escapeHtml(text).replace(/\n/g, "<br>");
     const approvalId = approvalMeta?.source === "approval" && typeof approvalMeta.approval_id === "string" ? approvalMeta.approval_id : null;
     if (approvalId) content = renderApprovalCard(approvalId, text, approvalMeta.detail || "");
     const emailId = approvalMeta?.source === "email-approval" && typeof approvalMeta.email_id === "string" ? approvalMeta.email_id : null;
     if (emailId) content = renderMailApprovalCard(approvalMeta);
-    const time = ts ? formatTime(ts) : "";
 
     content = withMedia(content, text, imageUrl || approvalMeta?.file_url || audioUrl, approvalMeta?.file_name);
     if (role === "email") content = `<strong>${escapeHtml(t("chat.reply.mail"))}${approvalMeta?.from ? ` · ${escapeHtml(approvalMeta.from)}` : ""}</strong><br>${content}`;
 
+    const div = createMessageBubble(role, `${replyMeta ? quoteHtml(replyMeta) : ""}${content}`, ts);
     const msgId = safeMsgId(id);
     div.setAttribute("data-msg-id", msgId);
-    div.innerHTML = `${replyMeta ? quoteHtml(replyMeta) : ""}${content}${time ? `<span class="time">${escapeHtml(time)}</span>` : ""}<div class="reaction-display" id="reactions-${escapeAttr(msgId)}"></div>`;
+    div.innerHTML += `<div class="reaction-display" id="reactions-${escapeAttr(msgId)}"></div>`;
+    addKeptActions(div, msgId);
 
     let pressTimer = null;
     div.addEventListener("touchstart", (e) => {
@@ -1308,6 +1406,7 @@
       <div class="reaction-display" id="reactions-${escapeAttr(msgId)}"></div>
     `;
 
+    addKeptActions(div, msgId);
     const playBtn = div.querySelector(".voice-play-btn");
     playBtn.onclick = function(e) {
       e.preventDefault();
@@ -1416,7 +1515,206 @@
     { key: "sad", char: "\uD83D\uDE22" },
   ];
 
+  // Keep an empty live region mounted before announcing a confirmation.
+  const confirmationStatus = document.createElement("div");
+  confirmationStatus.className = "confirmation-status";
+  confirmationStatus.setAttribute("role", "status");
+  confirmationStatus.setAttribute("aria-live", "polite");
+  confirmationStatus.setAttribute("aria-atomic", "true");
+  document.body.appendChild(confirmationStatus);
+  let confirmationTimer, confirmationFrame;
+  function positionConfirmation() {
+    // Measure the composer rather than assuming a height (drafts and keyboards vary).
+    const composer = document.getElementById("input-area");
+    confirmationStatus.style.top = `${composer.getBoundingClientRect().top - 8}px`;
+  }
+  function clearConfirmation() {
+    clearTimeout(confirmationTimer);
+    cancelAnimationFrame(confirmationFrame);
+    confirmationStatus.textContent = "";
+  }
+  function showConfirmation(text) {
+    clearConfirmation();
+    positionConfirmation();
+    // A separate update also announces consecutive confirmations with identical text.
+    confirmationFrame = requestAnimationFrame(() => {
+      confirmationStatus.textContent = text;
+      confirmationTimer = setTimeout(clearConfirmation, 2000);
+    });
+  }
+  new ResizeObserver(positionConfirmation).observe(document.getElementById("input-area"));
+  window.addEventListener("resize", positionConfirmation);
+  window.visualViewport?.addEventListener("resize", positionConfirmation);
+  window.visualViewport?.addEventListener("scroll", positionConfirmation);
+
+  const keptDialog = document.getElementById("kept-dialog");
+  const keptBody = document.getElementById("kept-body");
+  const keptStatus = document.getElementById("kept-status");
+  let keptEntries = [];
+  let keptBusy = false;
+
+  function keptButton(label, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", action);
+    return button;
+  }
+  function paintKeptMarker(div) {
+    const marked = keptEntries.some(entry => entry.message_id === div.dataset.msgId);
+    let marker = div.querySelector(".kept-marker");
+    if (marked && !marker) {
+      marker = document.createElement("span");
+      marker.className = "kept-marker";
+      marker.innerHTML = '<svg width="12" height="14" viewBox="0 0 12 14" fill="none" stroke="currentColor" aria-hidden="true"><path d="M2 1h8v12l-4-3-4 3z"/></svg>';
+      marker.title = t("kept.mark");
+      marker.setAttribute("role", "img");
+      marker.setAttribute("aria-label", t("kept.mark"));
+      div.appendChild(marker);
+    } else if (!marked) marker?.remove();
+  }
+  function addKeptActions(div, msgId) {
+    if (!msgId || div.querySelector("[data-house-question]")) return;
+    const button = keptButton("⋯", () => showEmojiPicker(div, msgId));
+    button.className = "message-actions";
+    button.title = t("kept.actions");
+    button.setAttribute("aria-label", t("kept.actions"));
+    div.appendChild(button);
+    paintKeptMarker(div);
+  }
+  async function keptRequest(path, options) {
+    const response = await fetch(path, { cache: "no-store", ...options }).catch(() => { throw new Error(t("kept.unreachable")); });
+    const data = await response.json().catch(() => { throw new Error(t("kept.storage")); });
+    if (!response.ok) throw new Error(data.error || t("kept.storage"));
+    return data;
+  }
+  async function loadKept() {
+    keptEntries = await keptRequest("/api/kept");
+    messagesEl.querySelectorAll(".message[data-msg-id]").forEach(paintKeptMarker);
+  }
+  function keptMeta(entry) {
+    const date = new Date(entry.said_at).toLocaleString(I18N.language, { dateStyle: "medium", timeStyle: "short" });
+    return `${date} · ${entry.speaker === "agent" ? t("kept.agent") : t("kept.person")}`;
+  }
+  function clearKeptBody() {
+    keptBody.querySelectorAll("audio").forEach(audio => audio.pause());
+    keptBody.replaceChildren();
+  }
+  function renderKeptList() {
+    clearKeptBody();
+    keptStatus.textContent = keptEntries.length ? "" : t("kept.empty");
+    for (const entry of keptEntries) {
+      const row = document.createElement("section");
+      row.className = "kept-row";
+      const open = keptButton("", () => renderKeptEntry(entry));
+      open.className = "kept-open";
+      const meta = document.createElement("span");
+      meta.className = "kept-meta";
+      meta.textContent = keptMeta(entry);
+      const preview = document.createElement("span");
+      preview.className = "kept-preview";
+      preview.textContent = entry.text || t("kept.audio");
+      open.append(meta, preview);
+      row.append(open);
+      if (entry.added_by === "agent") {
+        const note = document.createElement("small");
+        note.textContent = t("kept.addedByAgent");
+        row.append(note);
+      }
+      row.append(keptButton(t("kept.remove"), () => removeKept(entry)));
+      keptBody.append(row);
+    }
+  }
+  function renderKeptEntry(entry) {
+    keptStatus.textContent = "";
+    clearKeptBody();
+    const back = keptButton(t("kept.back"), () => { renderKeptList(); keptBody.querySelector("button")?.focus(); });
+    const meta = document.createElement("p");
+    meta.textContent = keptMeta(entry);
+    const content = document.createElement("article");
+    content.className = `message kept-content selectable ${entry.speaker === "agent" ? "assistant" : "user"}`;
+    content.innerHTML = renderMarkdown(entry.text);
+    const copy = document.createElement("div");
+    copy.className = "copybox kept-copy";
+    copy._copyText = entry.text;
+    const copyButton = keptButton(t("chat.copybox.copy"), () => {});
+    copyButton.className = "copybox-btn";
+    copy.append(copyButton);
+    keptBody.append(back, meta, content, copy);
+    if (entry.audio_url && /^\/api\/images\/[A-Za-z0-9_-]+\.(mp3|m4a|ogg|wav|webm|mp4)$/i.test(entry.audio_url)) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = entry.audio_url;
+      audio.setAttribute("aria-label", t("kept.audio"));
+      audio.addEventListener("error", () => { keptStatus.textContent = t("kept.audioMissing"); });
+      keptBody.append(audio);
+    }
+    if (entry.added_by === "agent") {
+      const note = document.createElement("small");
+      note.textContent = t("kept.addedByAgent");
+      keptBody.append(note);
+    }
+    keptBody.append(keptButton(t("kept.remove"), () => removeKept(entry)));
+    back.focus();
+  }
+  async function removeKept(entry) {
+    if (keptBusy || !window.confirm(t("kept.confirm"))) return;
+    clearConfirmation();
+    keptBusy = true;
+    try {
+      await keptRequest(`/api/kept/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
+      await loadKept();
+      if (keptDialog.open) { renderKeptList(); keptBody.querySelector("button")?.focus(); }
+      showConfirmation(t("kept.removed"));
+    } catch (error) { window.alert(error.message || t("kept.storage")); }
+    finally { keptBusy = false; }
+  }
+  async function toggleKept(msgId) {
+    document.querySelector(".emoji-picker")?.remove();
+    if (keptBusy) return;
+    clearConfirmation();
+    keptBusy = true;
+    try {
+      // Recheck before toggling so another device's changes are not silently reversed.
+      await loadKept();
+      const entry = keptEntries.find(item => item.message_id === msgId);
+      if (entry) {
+        keptBusy = false;
+        await removeKept(entry);
+        return;
+      }
+      await keptRequest("/api/kept", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message_id: msgId }),
+      });
+      await loadKept();
+      showConfirmation(t("kept.saved"));
+    } catch (error) { window.alert(error.message || t("kept.storage")); }
+    finally { keptBusy = false; }
+  }
+  async function openKept() {
+    // A modal makes the rest of the document inert, including live regions.
+    keptDialog.appendChild(confirmationStatus);
+    clearKeptBody();
+    keptStatus.textContent = t("kept.loading");
+    if (!keptDialog.open) keptDialog.showModal();
+    try { await loadKept(); if (keptDialog.open) renderKeptList(); }
+    catch {
+      keptStatus.textContent = t("kept.storage");
+      keptBody.append(keptButton(t("kept.retry"), openKept));
+    }
+  }
+  document.getElementById("kept-btn")?.addEventListener("click", openKept);
+  document.getElementById("kept-close")?.addEventListener("click", () => keptDialog.close());
+  keptDialog?.addEventListener("close", () => {
+    clearKeptBody();
+    document.body.appendChild(confirmationStatus);
+    document.getElementById("kept-btn")?.focus();
+  });
+
   function showEmojiPicker(msgEl, msgId) {
+    if (msgEl.querySelector?.("[data-house-question]")) return;
     const old = document.querySelector(".emoji-picker");
     if (old) old.remove();
 
@@ -1424,20 +1722,27 @@
     // and the id never passes through markup).
     const picker = document.createElement("div");
     picker.className = "emoji-picker";
+    let firstButton;
     const addButton = (label, onTap, title) => {
       const b = document.createElement("button");
       b.className = title ? "emoji-btn reply-btn" : "emoji-btn";
       b.textContent = label;
-      if (title) b.title = title;
+      if (title) { b.title = title; b.ariaLabel = title; }
       b.addEventListener("click", onTap);
       picker.appendChild(b);
+      firstButton ??= b;
     };
     for (const e of EMOJIS) addButton(e.char, () => window.sendReaction(msgId, e.char));
     addButton("↩", () => window.startReply(msgId), t("chat.picker.reply"));
     addButton("⧉", () => window.copyMessage(msgId), t("chat.picker.copy"));
     addButton("¶", () => window.enableSelect(msgId), t("chat.picker.select"));
+    if (msgId) addButton("🔖", () => toggleKept(msgId), keptEntries.some(entry => entry.message_id === msgId) ? t("kept.remove") : t("kept.keep"));
 
     msgEl.appendChild(picker);
+    firstButton?.focus?.();
+    picker.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { picker.remove(); msgEl.querySelector(".message-actions")?.focus(); }
+    });
 
     // Under the newest message the picker's second row would sit behind the
     // input bar: bring it into view once it is laid out.
@@ -1612,7 +1917,7 @@
 
   function messageSnippet(div) {
     const clone = div.cloneNode(true);
-    clone.querySelectorAll(".time, .reaction-display, .emoji-picker, .msg-quote").forEach(el => el.remove());
+    clone.querySelectorAll(".time, .reaction-display, .emoji-picker, .msg-quote, .kept-marker, .message-actions").forEach(el => el.remove());
     const t = (clone.textContent || "").trim().replace(/\s+/g, " ");
     return t.length > 90 ? t.slice(0, 90) + "…" : t;
   }
@@ -1663,7 +1968,7 @@
 
   function messageSnippetFull(div) {
     const clone = div.cloneNode(true);
-    clone.querySelectorAll(".time, .reaction-display, .emoji-picker, .msg-quote").forEach(el => el.remove());
+    clone.querySelectorAll(".time, .reaction-display, .emoji-picker, .msg-quote, .kept-marker, .message-actions").forEach(el => el.remove());
     return (clone.textContent || "").trim();
   }
 
@@ -3094,6 +3399,7 @@
     } catch {}
   }
   async function loadStoredReactions() {
+    loadKept().catch(() => {});
     try {
       const res = await fetch("/api/reactions");
       const reactions = await res.json();

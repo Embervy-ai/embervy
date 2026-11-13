@@ -43,6 +43,8 @@ app channel.
 
 ## Thinking on your own plan
 
+**Yes: your agent thinks on the Claude or ChatGPT plan you already have.** How much it can do in a week depends on the size of that plan. The details, with the providers' own statements:
+
 The house thinks with the person's own AI plan. On Claude, the head is Anthropic's own, unmodified Claude Code; on a Claude plan, `claude -p` draws from that plan's limits ([Anthropic's help article](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)). ChatGPT runs on the person's own ChatGPT plan: OpenAI's CEO announced in May 2026 that ChatGPT accounts and their plans can be used in third-party agent platforms ([his post](https://x.com/sama/status/2050357911915028689)), and OpenAI documents [Sign in with ChatGPT](https://developers.openai.com/siwc) for open-source and locally hosted apps. Today the house signs in the way OpenAI's Codex CLI does; the official Sign in with ChatGPT is built in as an opt-in route and becomes the default once our own houses have run on it. Providers can change their rules. If one does, the house changes its head and keeps its memory, its archive and its app.
 
 ## The app

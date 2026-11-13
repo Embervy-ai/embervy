@@ -80,8 +80,8 @@ test("server forwards the house input guard setting and preserves the Brain bypa
   }
 });
 
-test("house question API and UI regression suites", () => {
-  const result = Bun.spawnSync([process.execPath, "test", "./house-question.test.ts", "./house-question-ui.test.ts"], {
+test("house question, send preservation and asset regression suites", () => {
+  const result = Bun.spawnSync([process.execPath, "test", "./house-question.test.ts", "./house-question-ui.test.ts", "./send-message.test.ts", "./lightbox.test.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "pipe", timeout: 15000,
   });
   expect(result.stderr.toString()).not.toContain("(fail)");
@@ -230,7 +230,8 @@ const paneCases = [
   ["trust-question", "known"],
   ["trust-question-restart", "known"],
   ["model-menu", "unknown"],
-  ["permission-question", "unknown"],
+  ["permission-question", "known"],
+  ["auto-mode-confirmation", "known"],
   ["long-input", "unknown"],
   ["shell-after-exit", "unknown"],
 ] as const;

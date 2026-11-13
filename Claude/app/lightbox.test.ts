@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { readAssetReferences, readAssetStamp, readAssetUrl, readCacheNumber } from "./test-asset-stamps";
 
 const read = (path: string) => readFileSync(join(import.meta.dir, path), "utf8");
 const source = read("public/app.js");
@@ -332,15 +333,21 @@ test("navigation has faded disabled edges, centered safe-area controls and clipp
 test("asset references agree across all HTML pages and the service worker", () => {
   const worker = read("public/sw.js");
   const index = read("public/index.html");
-  for (const asset of ["app.js", "style.css"]) {
-    const pattern = new RegExp(`${asset.replace(".", "\\.")}\\?v=(\\d+)`, "g");
-    const version = [...index.matchAll(pattern)][0][1];
-    expect(Number(version)).toBeGreaterThan(asset === "app.js" ? 136 : 121);
-    expect(worker).toContain(`/${asset}?v=${version}`);
+  for (const asset of ["app.js", "style.css"] as const) {
+    const version = readAssetStamp(index, asset);
+    const url = readAssetUrl(index, asset);
+    expect(version).toBeGreaterThan(asset === "app.js" ? 136 : 121);
+    expect(readAssetUrl(worker, asset)).toBe(url);
     for (const file of readdirSync(join(import.meta.dir, "public")).filter(file => file.endsWith(".html"))) {
-      for (const match of read(`public/${file}`).matchAll(pattern)) expect(match[1]).toBe(version);
+      const page = read(`public/${file}`);
+      // Some pages do not use this asset; every reference on the others must agree.
+      if (!page.includes(`${asset}?v=`)) continue;
+      for (const reference of readAssetReferences(page, asset)) {
+        expect(reference.version).toBe(version);
+        expect(reference.url).toBe(url);
+      }
     }
   }
-  expect(Number(/CACHE_NAME = "embervy-v(\d+)(?:-h\d+)?"/.exec(worker)![1])).toBeGreaterThan(53);
+  expect(readCacheNumber(worker)).toBeGreaterThan(53);
   expect(source).toContain("openLightbox(img.src, img)");
 });

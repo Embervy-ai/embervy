@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readAssetStamp, readAssetUrl, readCacheNumber } from "./test-asset-stamps";
 import { parseEnv } from "../../shared/scripts/env-file";
 
 
@@ -486,14 +487,14 @@ describe("Brain menu refresh surface", () => {
     const index = readFileSync(join(import.meta.dir, "public/index.html"), "utf8");
     const settings = readFileSync(join(import.meta.dir, "public/settings.html"), "utf8");
     const worker = readFileSync(join(import.meta.dir, "public/sw.js"), "utf8");
-    const style = index.match(/style\.css\?v=(\d+)/)![1];
-    const script = index.match(/app\.js\?v=(\d+)/)![1];
-    expect(Number(style)).toBeGreaterThan(120);
-    expect(Number(script)).toBeGreaterThan(137);
-    expect(settings).toContain(`/style.css?v=${style}`);
-    expect(worker).toContain(`/style.css?v=${style}`);
-    expect(worker).toContain(`/app.js?v=${script}`);
-    expect(Number(worker.match(/CACHE_NAME = "embervy-v(\d+)(?:-h\d+)?"/)![1])).toBeGreaterThan(54);
+    const style = readAssetUrl(index, "style.css");
+    const script = readAssetUrl(index, "app.js");
+    expect(readAssetStamp(index, "style.css")).toBeGreaterThan(120);
+    expect(readAssetStamp(index, "app.js")).toBeGreaterThan(137);
+    expect(readAssetUrl(settings, "style.css")).toBe(style);
+    expect(readAssetUrl(worker, "style.css")).toBe(style);
+    expect(readAssetUrl(worker, "app.js")).toBe(script);
+    expect(readCacheNumber(worker)).toBeGreaterThan(54);
     const css = readFileSync(join(import.meta.dir, "public/style.css"), "utf8");
     expect(css).toContain("#brain-menu-refresh-btn.refreshing span { animation: brain-menu-spin");
     expect(css).toContain("@keyframes brain-menu-spin");

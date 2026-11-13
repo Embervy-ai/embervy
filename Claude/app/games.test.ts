@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { readAssetUrl } from "./test-asset-stamps";
 const g = createRequire(import.meta.url)("./public/games.js");
 
 for (const [game, good, expected, bad] of [
@@ -74,7 +75,7 @@ test("games assets, translations and common receive hook are connected", () => {
   const app = read("./public/app.js"), source = read("./public/games.js");
   const en = JSON.parse(read("./strings/en.json"));
   for (const match of source.matchAll(/t\("(games\.[\w]+)"/g)) expect(en[match[1]]).toBeTruthy();
-  const games = read("./public/index.html").match(/\/games\.js\?v=\d+(-h\d+)?/)?.[0];
+  const games = readAssetUrl(read("./public/index.html"), "games.js");
   expect(games).toBeTruthy();
   expect(read("./public/sw.js")).toContain(`${games}"`);
   expect(app).toContain('text.startsWith("[GAME]")');

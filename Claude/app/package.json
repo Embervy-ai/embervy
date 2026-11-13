@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "hono": "^4.12.21",
+    "hono": "^4.13.16",
     "web-push": "^3.6.6"
   },
   "devDependencies": {
@@ -20,10 +20,10 @@
     "typescript": "^5.4.0"
   },
   "overrides": {
-    "@hono/node-server": "^1.19.17",
+    "@hono/node-server": "^1.19.18",
     "body-parser": "^2.4.0",
     "fast-uri": "^3.1.9",
-    "hono": "^4.12.21",
+    "hono": "^4.13.16",
     "ip-address": "^10.7.4",
     "proxy-addr": "^2.0.8",
     "qs": "^6.16.1",

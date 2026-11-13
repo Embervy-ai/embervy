@@ -159,12 +159,12 @@ test("email approval renders the familiar card and escapes the full detail", asy
 test("email-approval history messages take the card path rather than the fallback text", () => {
   const escape = SOURCE.slice(SOURCE.indexOf("  function escapeHtml(text)"), SOURCE.indexOf("  const MESSAGE_ID_RE"));
   const renderer = SOURCE.slice(SOURCE.indexOf("  function mailApprovalLabel(status)"), SOURCE.indexOf("  const mailApprovalVersions"));
-  const add = SOURCE.slice(SOURCE.indexOf("  function addMessage(role,"), SOURCE.indexOf("  function addVoiceMessage(role,"));
+  const add = SOURCE.slice(SOURCE.indexOf("  function createMessageBubble("), SOURCE.indexOf("  function addVoiceMessage(role,"));
   const run = new Function("t", "meta", `
     const messageIds = new Set(); let lastSeenTs = ""; const window = {};
     const safeMediaUrl = () => "", showTyping = () => {}, workingEl = null;
     const renderMarkdown = () => "fallback prose", safeMsgId = id => id, withMedia = content => content;
-    const atBottom = () => true, scrollToBottom = () => {};
+    const atBottom = () => true, scrollToBottom = () => {}, addKeptActions = () => {};
     const refreshes = [], refreshMailApproval = id => refreshes.push(id);
     const div = { innerHTML: "", setAttribute() {}, addEventListener() {} };
     const document = { createElement: () => div }, messagesEl = { appendChild() {} };

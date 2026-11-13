@@ -1,4 +1,6 @@
 #!/bin/bash
+# A loop started from an existing session must not pass its marker to helpers.
+unset EMBERVY_MAIN_BRIDGE_TOKEN
 HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"; export HOME
 # A systemd start lacks the interactive PATH; add where bun and claude are installed.
 export PATH="$PATH:$HOME/.local/bin:$HOME/.bun/bin"
@@ -15,6 +17,7 @@ ENV_LIB="$(dirname -- "${BASH_SOURCE[0]}")/../../shared/scripts/env-file.sh"
 tmux() { embervy_tmux "$@"; }
 EMBERVY_HOME="${EMBERVY_HOME:-$(embervy_home_default)}"; export EMBERVY_HOME
 embervy_env_load -x "$EMBERVY_HOME/Claude/app/.env"
+unset EMBERVY_MAIN_BRIDGE_TOKEN
 TMUX_SESSION="${EMBERVY_TMUX_SESSION:-embervy}"
 APP_HOST="${EMBERVY_APP_HOST:-127.0.0.1}"
 APP_PORT="${EMBERVY_APP_PORT:-3030}"
@@ -111,6 +114,18 @@ new_main_bridge_token() {
 }
 clear_main_bridge_token
 
+restart_notice_effort() {
+  python3 -c 'import json, os; print(json.load(open(os.path.expanduser("~/.claude/settings.json"))).get("effortLevel", "default"))' 2>/dev/null || printf '?\n'
+}
+
+restart_notice_mcps() {
+  if [ "${EMBERVY_MCP_LIST+x}" = x ]; then
+    printf '%s\n' "$EMBERVY_MCP_LIST"
+  else
+    python3 -c 'import json, sys; print(",".join(sorted(json.load(open(sys.argv[1]))["mcpServers"].keys())))' "$EMBERVY_HOME/.mcp.json" 2>/dev/null || printf '?\n'
+  fi
+}
+
 notify_runtime_swap() {
   local rc="$1" reason
   case "$rc" in
@@ -122,8 +137,8 @@ notify_runtime_swap() {
 
   local build effort mcps
   build=$(claude --version 2>/dev/null | head -1 || echo "?")
-  effort=$(python3 -c 'import json; print(json.load(open(f"{__import__("os").path.expanduser(\"~/.claude/settings.json\")}")).get("effortLevel","default"))' 2>/dev/null || echo "?")
-  mcps="${EMBERVY_MCP_LIST:-app}"
+  effort=$(restart_notice_effort)
+  mcps=$(restart_notice_mcps)
 
   local text
   text=$(printf 'Runtime restarted.\nReason: %s\nBuild: %s\nEffort: %s\nMCPs: %s' \
@@ -191,6 +206,7 @@ export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
 
 # MCP subprocesses need the app's tokens. The .env is read as data, never run.
 embervy_env_load -x "$EMBERVY_HOME/Claude/app/.env"
+unset EMBERVY_MAIN_BRIDGE_TOKEN
 
 # Headless runs share the transcript folder, so the newest file need not be the main session.
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$HOME/.claude/projects/$(echo "$EMBERVY_HOME" | tr / -)}"
@@ -379,7 +395,7 @@ stop_cache_ping() {
   fi
 }
 trap 'stop_cache_ping; clear_main_bridge_token; stop_dialog_poller' EXIT
-trap 'stop_cache_ping; clear_main_bridge_token; echo "$(date -Iseconds) loop: shell SIGTERM — finalizing running session before exit" >> "$LOG"; stop_dialog_poller; finalize_on_term; exit 0' TERM INT
+trap 'stop_cache_ping; clear_main_bridge_token; echo "$(date -Iseconds) loop: shell SIGTERM — finalizing running session before exit" >> "$LOG"; stop_dialog_poller; finalize_on_term; if [ -n "${LOOP_CLAUDE_PID:-}" ]; then kill "$LOOP_CLAUDE_PID" 2>/dev/null || true; wait "$LOOP_CLAUDE_PID" 2>/dev/null || true; fi; exit 0' TERM INT
 
 CHANNELS="${EMBERVY_CHANNELS:-$(embervy_app_server_name "$EMBERVY_HOME/.mcp.json")}"
 CHANNEL_ARGS=()
@@ -414,19 +430,46 @@ while true; do
     echo "$(date -Iseconds) loop: no bridge — starting bare" >> "$LOG"
   fi
 
+  new_main_bridge_token >/dev/null \
+    || echo "$(date -Iseconds) loop: cannot write $MAIN_BRIDGE_TOKEN_FILE — this session's bridge keeps no inbox position; messages sent during a restart are not picked up" >> "$LOG"
+  # Keep stdin and the terminal process group; undo Bash asynchronous-job signal
+  # ignores before exec. The exec preserves the PID/start stamp being observed.
+  # The launcher inherits no bridge token. Read the private file only for the
+  # exec target environment, without putting the token in os.environ or argv.
+  python3 -c '
+import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+try:
+    with open(sys.argv[1]) as token_file:
+        token = token_file.read().strip()
+except OSError:
+    token = ""
+try: os.execvpe("claude", ["claude"] + sys.argv[2:], dict(os.environ, EMBERVY_MAIN_BRIDGE_TOKEN=token))
+except OSError as error:
+    print("loop: cannot start claude: " + str(error), file=sys.stderr)
+    sys.exit(127 if isinstance(error, FileNotFoundError) else 126)
+' "$MAIN_BRIDGE_TOKEN_FILE" "${CLAUDE_ARGS[@]}" "${PASS_ARGS[@]}" <&0 &
+  LOOP_CLAUDE_PID=$!
+  read -r _ LOOP_CLAUDE_STAMP < <(loop_dialog_process_stamp "$LOOP_CLAUDE_PID")
+  LOOP_QUESTION_GENERATION=$(cat /proc/sys/kernel/random/uuid)
+  DIALOG_TARGET=$(tmux display-message -p -t "${TMUX_PANE:-$TMUX_SESSION}" '#{pane_id}' 2>/dev/null)
   # Only the explicit development choice is safe to automate; other setup needs a user.
   loop_question_reset
   (
     loop_startup_clock_start 180
-    while true; do
+    # Defer termination until a foreground capture/send finishes. The parent waits
+    # for this worker before launching a successor, including on signals.
+    trap 'exit 0' TERM INT
+    while loop_dialog_owner_alive; do
       sleep 0.5
-      PANE=$(tmux capture-pane -t "${TMUX_PANE:-$TMUX_SESSION}" -p -J 2>/dev/null) || PANE=""
-      KIND=$(loop_dialog_kind "$PANE")
-      loop_unknown_watch "$PANE" "${TMUX_PANE:-$TMUX_SESSION}" "$KIND"
-      # Inspect the current screen before expiring a startup budget.
-      loop_dialog_continue "$KIND" || break
-      loop_dialog_step "$PANE" "${TMUX_PANE:-$TMUX_SESSION}" "$KIND" || true
+      loop_dialog_owner_alive || break
+      [ -n "$DIALOG_TARGET" ] || break
+      # Join tmux soft wraps. Hard-wrapped or incomplete menus still fail closed.
+      PANE=$(tmux capture-pane -J -t "$DIALOG_TARGET" -p 2>/dev/null) || PANE=""
+      loop_dialog_observe "$PANE" "$DIALOG_TARGET"
     done
+    loop_question_clear
   ) &
   DIALOG_POLLER_PID=$!
 
@@ -437,10 +480,7 @@ while true; do
     EMBERVY_CACHE_PING_PANE="$INPUT_PANE" bash "$EMBERVY_HOME/Claude/scripts/birth-prompt.sh" "$MODE" >> "$LOG" 2>&1 &
     BIRTH_PROMPT_PID=$!
   fi
-  MAIN_BRIDGE_TOKEN="$(new_main_bridge_token)" || MAIN_BRIDGE_TOKEN=""
-  [ -n "$MAIN_BRIDGE_TOKEN" ] \
-    || echo "$(date -Iseconds) loop: cannot write $MAIN_BRIDGE_TOKEN_FILE — this session's bridge keeps no inbox position; messages sent during a restart are not picked up" >> "$LOG"
-  EMBERVY_MAIN_BRIDGE_TOKEN="$MAIN_BRIDGE_TOKEN" claude "${CLAUDE_ARGS[@]}" "${PASS_ARGS[@]}"
+  wait "$LOOP_CLAUDE_PID"
   rc=$?
   stop_cache_ping
   clear_main_bridge_token

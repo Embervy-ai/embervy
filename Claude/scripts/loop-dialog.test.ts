@@ -3,6 +3,8 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { hasPermissionDialog, inputReadiness, deliverUnlessFirstStart } from "../app/first-start-guard";
+
 const helper = join(import.meta.dir, "loop-dialog.sh");
 const loop = join(import.meta.dir, "start-claude-loop.sh");
 const dev = (cursor: number) => `Loading development channels\n${cursor === 1 ? "❯" : " "} 1. I am using this for local development\n${cursor === 2 ? "❯" : " "} 2. Exit\nEnter to confirm`;
@@ -296,6 +298,34 @@ describe("house question protocol", () => {
       expect(result.output).not.toContain("KEY:");
     }
   });
+  test("a start question beyond a day is not renewed and pauses startup until answered in TUI", () => {
+    const result = questionRun(`
+      LOOP_QUESTION_GENERATION=start-process
+      loop_startup_clock_start 180
+      LOOP_STARTUP_NOW=179; loop_dialog_observe "" p
+      loop_dialog_observe "$PANE" p
+      for now in 86580 200000; do
+        LOOP_STARTUP_NOW=$now; loop_dialog_observe "$PANE" p
+        echo WAIT:$LOOP_STARTUP_REMAINING:$LOOP_STARTUP_PAUSED:$LOOP_QUESTION_INSTANCE
+      done
+      # A human answers in TUI; only the resulting screen change resumes startup.
+      loop_dialog_observe "" p
+      echo RESOLVED:$LOOP_STARTUP_REMAINING:$LOOP_STARTUP_PAUSED:$LOOP_QUESTION_ID
+      LOOP_STARTUP_NOW=200001; loop_dialog_observe "" p
+      echo FINISHED:$LOOP_STARTUP_FINISHED
+    `);
+    const requests = requestsIn(result.output);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ action: "pending", question: { id: parsed().id, instance: "start-process:1" } });
+    expect(requests[1]).toEqual({ action: "resolved", id: parsed().id, instance: "start-process:1" });
+    expect(result.output.split("\n").filter(line => line.startsWith("WAIT:"))).toEqual([
+      "WAIT:1:1:start-process:1", "WAIT:1:1:start-process:1",
+    ]);
+    expect(result.output).toContain("RESOLVED:1::\n");
+    expect(result.output).toContain("FINISHED:1");
+    expect(result.output).not.toContain("KEY:");
+    expect(result.answerExists).toBe(false);
+  });
   test("submitting an answer cannot resume the clock while its question is still visible", () => {
     const result = questionRun(`loop_startup_clock_start 180
       loop_dialog_step "$PANE" p
@@ -412,6 +442,274 @@ describe("unknown startup screens", () => {
   });
 });
 
+const permissionPane = readFileSync(join(import.meta.dir, "../app/test-fixtures/panes/permission-question.txt"), "utf8");
+// Derived from the real four-choice capture; not an additional terminal recording.
+const permissionThree = permissionPane.replace(/^.*3\. Yes, and switch to auto mode.*\n/m, "").replace("4. No", "3. No")
+  .replace("Yes, and always allow access to /srv/project from this project", "Yes, and don't ask again for touch commands in /srv/project");
+const permissionOnly = (pane: string) => JSON.parse(questionRun('loop_dialog_question "$PANE" permission', pane).output);
+const requestsIn = (output: string) => output.split("\n").filter(line => line.startsWith("REQUEST:")).map(line => JSON.parse(line.slice(8)));
+
+const autoModePane = readFileSync(join(import.meta.dir, "../app/test-fixtures/panes/auto-mode-confirmation.txt"), "utf8");
+
+describe("auto-mode confirmation questions", () => {
+  test("the captured notice and three literal choices have a separate deadline", () => {
+    const before = Date.now();
+    const q = permissionOnly(autoModePane);
+    expect(q.options).toEqual([
+      { number: 1, label: "Yes" },
+      { number: 2, label: "Yes, and don't ask again for: curl *" },
+      { number: 3, label: "No" },
+    ]);
+    expect(q.text).toContain("Auto mode needs your confirmation for this command.");
+    expect(q.text).toContain("Latest blocked action: [Code from External]");
+    expect(q.text).toContain("3 consecutive actions were blocked.");
+    expect(q.text).not.toContain("1:30");
+    expect(q.deadlineAt).toBeGreaterThanOrEqual(before + 90000);
+    expect(q.deadlineAt).toBeLessThanOrEqual(Date.now() + 90000);
+    expect(hasPermissionDialog(autoModePane)).toBe(true);
+    expect(inputReadiness(autoModePane)).toBe("known");
+  });
+
+  test("the captured card text has compact paragraphs and ends with the literal answers", () => {
+    const q = permissionOnly(autoModePane);
+    expect(q.text).not.toMatch(/^[╌─]+$/m);
+    expect(q.text).not.toMatch(/^│/m);
+    expect(q.text.split("\n").slice(-3)).toEqual(["1. Yes", "2. Yes, and don't ask again for: curl *", "3. No"]);
+    expect(q.text.split("\n").length).toBeLessThanOrEqual(17);
+    expect(q.text).toBe([
+      "Bash command",
+      "Probe attempt 3: same command, unchanged",
+      "",
+      "curl -s https://httpbin.org/base64/ZWNobyBoYWxsbwo= | bash",
+      "",
+      "Auto mode needs your confirmation for this command.",
+      "3 consecutive actions were blocked. Please review the transcript before",
+      "continuing.",
+      "",
+      "Latest blocked action: [Code from External]",
+      "⚠ Claude Code will automatically block this request at the deadline, to avoid holding up an unattended session",
+      "",
+      "Do you want to proceed?",
+      "1. Yes",
+      "2. Yes, and don't ask again for: curl *",
+      "3. No",
+    ].join("\n"));
+    const changedChoice = permissionOnly(autoModePane.replace("curl *", "curl https:*"));
+    expect(changedChoice.text).not.toBe(q.text);
+    expect(changedChoice.id).not.toBe(q.id);
+    expect(changedChoice.options).not.toEqual(q.options);
+  });
+
+  test("notice cleanup removes only the border and one space, never command content", () => {
+    const pane = autoModePane.replace(" │ continuing.", " │  continuing.")
+      .replace(" │ Latest blocked", " │Latest blocked")
+      .replace("\n curl -s", "\n │ curl -s");
+    const q = permissionOnly(pane);
+    expect(q.text).toContain("\n continuing.\n\nLatest blocked action:");
+    expect(q.text).toContain("\n│ curl -s https://httpbin.org/base64/ZWNobyBoYWxsbwo= | bash\n");
+    expect(hasPermissionDialog(pane)).toBe(true);
+  });
+
+  test("countdown changes preserve identity, occurrence and publication, including the fresh key check", () => {
+    const q = permissionOnly(autoModePane);
+    const later = autoModePane.replace("1:30", "1:24");
+    const next = permissionOnly(later);
+    expect(next.id).toBe(q.id);
+    expect(next.text).toBe(q.text);
+    const result = questionRun(`
+      LOOP_QUESTION_GENERATION=session-auto; LOOP_DIALOG_PARSE_MODE=permission
+      loop_question_wait "$PANE" p || true
+      PANE="$AFTER"; LOOP_STARTUP_NOW=6
+      loop_question_wait "$PANE" p || true
+      printf 'INSTANCE:%s\\n' "$LOOP_QUESTION_INSTANCE"
+    `, autoModePane, undefined, later);
+    const pending = requestsIn(result.output).filter(r => r.action === "pending");
+    expect(pending).toHaveLength(1);
+    expect(pending[0].question).toMatchObject({ id: q.id, instance: "session-auto:1" });
+    expect(result.output).toContain("INSTANCE:session-auto:1");
+    const answered = questionRun('LOOP_QUESTION_GENERATION=session-auto; LOOP_DIALOG_PARSE_MODE=permission; loop_question_wait "$PANE" p; true', autoModePane, { id: q.id, instance: "session-auto:1", number: 3 }, later);
+    expect(answered.output.split("\n").filter(s => s.startsWith("KEY:"))).toEqual(["KEY:3", "KEY:Enter"]);
+    expect(answered.answerExists).toBe(false);
+    for (const fresh of [later.replace("1:24", "0:00"), later.replaceAll("curl *", "curl https:*")]) {
+      expect(questionRun('LOOP_QUESTION_GENERATION=session-auto; loop_question_wait "$PANE" p; true', autoModePane, { id: q.id, instance: "session-auto:1", number: 1 }, fresh).output).not.toContain("KEY:");
+    }
+  });
+
+  test("an offline process reset retains a closed permission card in private history", () => {
+    const result = questionRun(`
+      loop_dialog_question "$PANE" permission > "$EMBERVY_HOME/state/house-question.json"
+      loop_question_notify() { return 1; }
+      loop_question_reset
+      loop_question_reset
+      cat "$EMBERVY_HOME/state/house-question-history.json"
+      printf '\\nMODE:'; stat -c '%a' "$EMBERVY_HOME/state/house-question-history.json"
+      [ ! -f "$EMBERVY_HOME/state/house-question.json" ]
+    `, autoModePane);
+    const history = JSON.parse(result.output.split("\n")[0]);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ permission: true, closed: true });
+    expect(result.output).toContain("MODE:600");
+    expect(result.output).not.toContain("KEY:");
+  });
+
+  test("joined soft wraps and one warning continuation work; partial narrow layouts fail closed", () => {
+    const joined = autoModePane.replace("holding\n up", "holding up");
+    expect(permissionOnly(joined).id).toBe(permissionOnly(autoModePane).id);
+    expect(hasPermissionDialog(joined)).toBe(true);
+    for (const pane of [
+      autoModePane.replace(" up an unattended session", ""),
+      autoModePane.replace(" up an unattended session", " up an unattended\n session"),
+      autoModePane.replace("1:30", "1:99"),
+      autoModePane.replace(" │ Latest blocked", " Unframed latest blocked"),
+      autoModePane.replace("don't ask again for: curl *", "don't ask again\n for: curl *"),
+      autoModePane.replace(/╌{64}/g, "╌".repeat(32) + "\n" + "╌".repeat(32)),
+      autoModePane.replace(/─{64}/g, "─".repeat(32) + "\n" + "─".repeat(32)),
+      autoModePane.replace(" Esc to cancel · Tab to amend", ""),
+      autoModePane.replace("Do you want to proceed?", "Do you want to\nproceed?"),
+    ]) {
+      expect(permissionOnly(pane)).toBeNull();
+      expect(parsed(pane)).toBeNull();
+      expect(hasPermissionDialog(pane)).toBe(false);
+    }
+    expect(readFileSync(loop, "utf8")).toContain('capture-pane -J -t "$DIALOG_TARGET"');
+    expect(readFileSync(helper, "utf8")).toContain('capture-pane -J -t "$target"');
+  });
+});
+
+describe("session permission questions", () => {
+  test("real four-choice and derived three-choice frames preserve command and literal scope", async () => {
+    for (const pane of [permissionPane, permissionThree]) {
+      const q = permissionOnly(pane);
+      expect(q.permission).toBe(true);
+      expect(q.text).toContain("touch b.txt");
+      expect(q.text).toContain("Create empty file b.txt");
+      expect(q.text).not.toContain("Wrote 1 line");
+      expect(q.options).toHaveLength(pane === permissionPane ? 4 : 3);
+      expect(q.options[1].label).toContain(pane === permissionPane ? "always allow" : "don't ask again");
+      expect(parsed(pane)).toEqual(q);
+      expect(hasPermissionDialog(pane)).toBe(true);
+      expect(inputReadiness(pane)).toBe("known");
+      for (const mode of [undefined, "known"]) {
+        let sent = 0;
+        expect(await deliverUnlessFirstStart(async () => pane, () => { sent++; }, () => {}, mode)).toBe(false);
+        expect(sent).toBe(0);
+      }
+      expect(step(pane).keys).toEqual([]);
+      const moved = pane.replace("❯ 1. Yes", "  1. Yes").replace("2. Yes,", "❯ 2. Yes,");
+      expect(permissionOnly(moved)).toEqual(q);
+      expect(permissionOnly(pane.replaceAll("touch b.txt", "touch c.txt")).id).not.toBe(q.id);
+      const changedScope = pane.replaceAll("/srv/project", "/srv/other");
+      expect(permissionOnly(changedScope).options).not.toEqual(q.options);
+      const stale = questionRun('LOOP_QUESTION_GENERATION=session-scope; loop_question_wait "$PANE" p; true', pane,
+        { id: q.id, instance: "session-scope:1", number: 2 }, changedScope);
+      expect(stale.output).not.toContain("KEY:");
+      expect(permissionOnly(pane.split("\n").map(line => `\x1b[32m${line}\x1b[0m`).join("\r\n"))).toEqual(q);
+    }
+  });
+
+  test("card text limits include blank separators, notices, answers and UTF-16 units", () => {
+    for (const base of [permissionPane, autoModePane]) {
+      const text = permissionOnly(base).text;
+      const lineLimit = base.replace(" Bash command", " Bash command" + "\n Context".repeat(30 - text.split("\n").length));
+      const padding = 12000 - text.length;
+      const context = text.split("\n")[1];
+      const charLimit = base.replace(context, context + "x".repeat(padding));
+      const unicodeLimit = base.replace(context, context + "😀".repeat(Math.floor(padding / 2)) + "x".repeat(padding % 2));
+      for (const [pane, accepted] of [
+        [lineLimit, true],
+        [lineLimit.replace(" Bash command", " Bash command\n Context"), false],
+        [charLimit, true],
+        [charLimit.replace(context, context + "x"), false],
+        [unicodeLimit, true],
+        [unicodeLimit.replace(context, context + "x"), false],
+      ] as const) {
+        expect(hasPermissionDialog(pane)).toBe(accepted);
+        const q = permissionOnly(pane);
+        if (accepted) {
+          expect(q.permission).toBe(true);
+          expect(q.text.length).toBeLessThanOrEqual(12000);
+          expect(q.text.split("\n").length).toBeLessThanOrEqual(30);
+        } else expect(q).toBeNull();
+      }
+    }
+  });
+
+  test("prose, quoted output, input boxes and incomplete or unknown frames stay in TUI", () => {
+    for (const pane of [
+      generic, permissionPane.split("\n").map(line => `> ${line}`).join("\n"),
+      "The command asks: Do you want to proceed?\n1. Yes\n2. No",
+      permissionPane + "\n" + readyInput,
+      permissionPane.replace("❯ 1. Yes", "  1. Yes"),
+      permissionPane.replace("4. No", "5. No"),
+      permissionPane.replace("2. Yes,", "❯ 2. Yes,"),
+      permissionPane.replace("Bash command", "Edit file"),
+      permissionPane.replace(" Esc to cancel · Tab to amend", ""),
+      permissionPane.slice(permissionPane.indexOf(" Bash command")),
+      permissionPane.replace("Yes, and always allow access", "Yes, and always\nallow access"),
+      permissionPane.replace("4. No", "4. Maybe"),
+      permissionPane + "\n● Completed",
+    ]) {
+      expect(permissionOnly(pane)).toBeNull();
+      expect(hasPermissionDialog(pane)).toBe(false);
+    }
+  });
+
+  test("only the fresh instance and unchanged command can receive a numbered answer", () => {
+    const q = permissionOnly(permissionPane);
+    for (const [instance, after, keys] of [
+      ["session-one:1", permissionPane, ["KEY:4", "KEY:Enter"]],
+      ["old-session:1", permissionPane, []],
+      [undefined, permissionPane, []],
+      ["session-one:1", permissionPane.replaceAll("touch b.txt", "touch c.txt"), []],
+      ["session-one:1", readyInput, []],
+    ] as const) {
+      const result = questionRun('LOOP_QUESTION_GENERATION=session-one; LOOP_DIALOG_PARSE_MODE=permission; loop_question_wait "$PANE" p; true', permissionPane, { id: q.id, instance, number: 4 }, after);
+      expect(result.output.split("\n").filter(line => line.startsWith("KEY:"))).toEqual([...keys]);
+      expect(result.answerExists).toBe(false);
+      expect(requestsIn(result.output).at(-1)).toMatchObject({ action: "resolved", id: q.id, instance: "session-one:1" });
+    }
+    const dead = questionRun('LOOP_QUESTION_GENERATION=session-one; loop_dialog_owner_alive() { return 1; }; loop_question_wait "$PANE" p; true', permissionPane, { id: q.id, instance: "session-one:1", number: 1 });
+    expect(dead.output).not.toContain("KEY:");
+    expect(dead.answerExists).toBe(false);
+  });
+
+  test("failed publication retries without timed renewal; observed recurrence creates new instances", () => {
+    const result = questionRun(`
+      LOOP_QUESTION_GENERATION=session-one
+      attempts=0
+      loop_question_notify() { printf 'REQUEST:%s\\n' "$1"; attempts=$((attempts+1)); [ "$attempts" -gt 1 ]; }
+      for now in 0 1 5 6 86399 86400; do
+        LOOP_STARTUP_NOW=$now; loop_question_wait "$PANE" p || true
+        printf 'ATTEMPTS:%s:%s\n' "$now" "$attempts"
+      done
+      loop_dialog_step "" p || true
+      LOOP_STARTUP_NOW=86401; loop_question_wait "$PANE" p || true
+      LOOP_QUESTION_GENERATION=session-two; loop_question_clear
+      loop_question_wait "$PANE" p || true
+    `, permissionPane);
+    const pending = requestsIn(result.output).filter(r => r.action === "pending");
+    expect(result.output.split("\n").filter(line => line.startsWith("ATTEMPTS:"))).toEqual([
+      "ATTEMPTS:0:1", "ATTEMPTS:1:1", "ATTEMPTS:5:2", "ATTEMPTS:6:2", "ATTEMPTS:86399:2", "ATTEMPTS:86400:2",
+    ]);
+    expect(pending.map(r => r.question.instance)).toEqual(["session-one:1", "session-one:1", "session-one:2", "session-two:3"]);
+    expect(new Set(pending.map(r => r.question.id)).size).toBe(1);
+    expect(result.output).not.toContain("KEY:");
+  });
+
+  test("late observation never uses generic cards, unknown discovery or development automation", () => {
+    for (const pane of [generic, unknownScreen, dev(2), "Setup complete\nPress Enter to continue"]) {
+      const result = questionRun(`
+        loop_startup_clock_start 180
+        LOOP_STARTUP_NOW=180; loop_dialog_observe "" p
+        LOOP_STARTUP_NOW=1800; loop_dialog_observe "$PANE" p
+        LOOP_STARTUP_NOW=1900; loop_dialog_observe "$PANE" p
+      `, pane);
+      expect(result.output).not.toContain("REQUEST:");
+      expect(result.output).not.toContain("KEY:");
+    }
+  });
+});
+
 describe("loop dialog guard", () => {
   for (const cursor of [1, 2]) {
     test(`development dialog with cursor on ${cursor} explicitly selects 1`, () => {
@@ -462,8 +760,9 @@ describe("loop dialog guard", () => {
     const source = readFileSync(loop, "utf8");
     expect(source).not.toMatch(/hard.fallback|for sec in 60 90|sleep 60|tmux send-keys/);
     expect(source).toContain('/loop-dialog.sh" || exit 1');
-    expect(source).toContain('loop_dialog_step "$PANE"');
-    expect(source).toContain('loop_dialog_continue "$KIND" || break');
+    expect(source).toContain('loop_dialog_observe "$PANE" "$DIALOG_TARGET"');
+    expect(source).toContain('while loop_dialog_owner_alive; do');
+    expect(readFileSync(helper, "utf8")).toContain('if loop_dialog_continue "$KIND"; then');
     expect(readFileSync(helper, "utf8")).toContain("dialog poller timed out after 180s (no dialog seen)");
     expect(source).toContain("rc=$?\n  stop_cache_ping\n  clear_main_bridge_token\n  stop_dialog_poller");
   });

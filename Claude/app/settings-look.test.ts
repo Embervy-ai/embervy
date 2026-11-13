@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readAssetStamp, readAssetUrl, readCacheNumber } from "./test-asset-stamps";
 import { acceptedPushEndpoint } from "./push-endpoint";
 
 const read = (name: string) => readFileSync(join(import.meta.dir, name), "utf8");
@@ -29,9 +30,10 @@ function composite(fg: string, bg: string, alpha: number) {
   return "#" + [1, 3, 5].map(i => Math.round(parseInt(fg.slice(i, i + 2), 16) * alpha + parseInt(bg.slice(i, i + 2), 16) * (1 - alpha)).toString(16).padStart(2, "0")).join("");
 }
 function rule(source: string, selector: string) {
-  const start = source.indexOf(selector + " {");
-  expect(start).toBeGreaterThanOrEqual(0);
-  return source.slice(start, source.indexOf("}", start));
+  const rules = [...source.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  const match = rules.find(([, selectors]) => selectors.trim() === selector || selectors.split(",").some(s => s.trim() === selector));
+  expect(match).toBeDefined();
+  return match![2];
 }
 
 test("eight named presets retain six dark schemes and add Paper and Sand", () => {
@@ -178,7 +180,7 @@ test("an older cached settings page without the look fields still runs", () => {
   expect(run()).toMatch(/^#[0-9a-f]{6}$/i);
 });
 test("timestamps, placeholder and header icons follow text variables", () => {
-  for (const selector of [".message .time", "#input::placeholder", "#doctor-btn", "#notes-btn", "#activity-strip", "#reply-bar-cancel"]) expect(rule(css, selector)).toContain("var(--text-light)");
+  for (const selector of [".message .time", "#input::placeholder", "#doctor-btn", "#notes-btn", "#kept-btn", "#activity-strip", "#reply-bar-cancel"]) expect(rule(css, selector)).toContain("var(--text-light)");
 });
 test("the service worker never answers dynamic requests, so deleted content is not revived from it", async () => {
   const handlers: Record<string, Function> = {};
@@ -237,11 +239,11 @@ test("push cleanup preserves registrations made while sending", async () => {
 
 test("asset URLs agree across settings, app and service worker", () => {
   const index = read("public/index.html"), sw = read("public/sw.js");
-  const style = index.match(/\/style.css\?v=\d+/)![0];
-  expect(html).toContain(style);
-  expect(sw).toContain(style);
-  expect(sw).toContain(index.match(/\/app.js\?v=\d+/)![0]);
+  const style = readAssetUrl(index, "style.css");
+  expect(readAssetUrl(html, "style.css")).toBe(style);
+  expect(readAssetUrl(sw, "style.css")).toBe(style);
+  expect(readAssetUrl(sw, "app.js")).toBe(readAssetUrl(index, "app.js"));
   // Local asset changes may add a version suffix; require agreement rather than a fixed shipped number.
-  expect(sw).toMatch(/CACHE_NAME = "embervy-v\d+(-h\d+)?"/);
-  expect(html).toMatch(/\/settings\.js\?v=\d+(-h\d+)?"/);
+  expect(() => readCacheNumber(sw)).not.toThrow();
+  expect(() => readAssetStamp(html, "settings.js")).not.toThrow();
 });

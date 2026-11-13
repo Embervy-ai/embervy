@@ -4,6 +4,7 @@ import { systemPromptMode, type HeadSpec, type SystemPromptMode } from "./heads"
 import { loadClaudeToolRules } from "./claude-prompt";
 import { join } from "node:path";
 import { notesDirectory, notesMaxBytes, notesSection } from "./notes";
+import { skillsSection } from "./skills";
 
 type Env = Record<string, string | undefined>;
 type Log = (event: Record<string, unknown>) => void;
@@ -65,6 +66,8 @@ export function systemPromptExtras(
   const parsed = Number(env.BRAIN_CONTEXT_FILE_MAX_BYTES);
   const maxBytes = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 80000;
   if (head.transport === "api") {
+    const skills = skillsSection(env, log);
+    if (skills) parts.push(skills);
     const files = (env.BRAIN_CONTEXT_FILES ?? "").split(":").map((file) => file.trim()).filter(Boolean);
     const sections: string[] = [];
     for (const file of files) {

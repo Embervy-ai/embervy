@@ -6,7 +6,7 @@ tmux() { embervy_tmux "$@"; }
 # Hash only the dialog, without the movable cursor or terminal surroundings.
 loop_dialog_question() {
   printf '%s\n' "$1" | python3 -c '
-import sys, re, json, hashlib
+import sys, re, json, hashlib, time
 plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", sys.stdin.read()).replace("\r\n", "\n").replace("\r", "\n")
 raw = plain.rstrip().split("\n")
 lines = [x.strip() for x in raw]
@@ -27,6 +27,64 @@ if sys.argv[1] == "ready":
     sys.exit()
 if ready:
     print("null")
+    sys.exit()
+# Permission grammar is mirrored in first-start-guard.ts; parity tests cover both.
+# Only the complete active Bash frame is supported. Unknown tool layouts stay in TUI.
+permission = None
+for start in range(len(lines)-1, -1, -1):
+    if not re.fullmatch(r"─{10,}", lines[start]): continue
+    if start > 0 and re.fullmatch(r"─+", lines[start-1]): continue
+    block = lines[start+1:]
+    if not block or block[0] != "Bash command": continue
+    try:
+        heading = block.index("Do you want to proceed?")
+        rules = [i for i in range(1, heading) if re.fullmatch(r"╌{10,}", block[i])]
+        if len(rules) != 2 or rules[1] <= rules[0]+1: continue
+        if not all(block[rules[0]+1:rules[1]]): continue
+        # Only the known warning (whole or one hard continuation) and pipe notes.
+        # tmux -J joins soft wraps; do not guess at other truncated layouts.
+        notice, deadline, valid = [], None, True
+        i = rules[1]+1
+        warning = r"⚠ Claude Code will automatically block this request in ([0-9]+):([0-5][0-9]), to avoid holding up an unattended session"
+        while i < heading:
+            line = block[i]
+            if not line or line.startswith("│"):
+                notice.append(line)
+            elif line.startswith("⚠") and deadline is None:
+                match = re.fullmatch(warning, line)
+                if not match and i+1 < heading:
+                    match = re.fullmatch(warning, line+" "+block[i+1])
+                    if match: i += 1
+                if not match:
+                    valid = False
+                    break
+                deadline = int(time.time()*1000) + (int(match[1])*60+int(match[2]))*1000
+                notice.append("⚠ Claude Code will automatically block this request at the deadline, to avoid holding up an unattended session")
+            else:
+                valid = False
+                break
+            i += 1
+        if not valid: continue
+        tail = [x for x in block[heading+1:] if x]
+        if not tail or tail[-1] not in ("Esc to cancel · Tab to amend", "Esc to cancel"): continue
+        matches = [re.fullmatch(r"(?:(❯|>)\s*)?([1-9][0-9]*)\. (.+)", x) for x in tail[:-1]]
+        if len(matches) not in (3, 4) or not all(matches): continue
+        if sum(bool(x[1]) for x in matches) != 1: continue
+        options = [{"number": int(x[2]), "label": x[3]} for x in matches]
+        if [x["number"] for x in options] != list(range(1, len(options)+1)): continue
+        if options[0]["label"] != "Yes" or options[-1]["label"] != "No": continue
+        if not all(x["label"].startswith("Yes, ") for x in options[1:-1]): continue
+        option_lines = [str(x["number"])+". "+x["label"] for x in options]
+        text = "\n".join(block[:rules[0]] + [""] + block[rules[0]+1:rules[1]] + [""]
+                         + [re.sub(r"^│ ?", "", line) for line in notice] + [block[heading]] + option_lines)
+        # Bound the actual card text, using UTF-16 units like the server and guard.
+        if len(text.encode("utf-16-le")) // 2 > 12000 or len(text.split("\n")) > 30: continue
+        permission = {"text": text, "options": options, "permission": True, "id": hashlib.sha256(text.encode()).hexdigest()}
+        if deadline is not None: permission["deadlineAt"] = deadline
+        break
+    except ValueError: continue
+if permission is not None or sys.argv[1] == "permission" or "Do you want to proceed?" in plain or "Bash command" in lines:
+    print(json.dumps(permission, ensure_ascii=False))
     sys.exit()
 option = re.compile(r"^(?:(❯|>)\s*)?([1-9][0-9]*)\s*[.)]\s+(.+)$")
 # Each cue can keep an incomplete or reworded trust dialog from receiving a blind Enter.
@@ -133,7 +191,10 @@ loop_question_notify() {
   [ -n "${INTERNAL_API_TOKEN:-}" ] && [ -n "${APP_HOST:-}" ] && [ -n "${APP_PORT:-}" ] || return 0
   embervy_curl_bearer "$INTERNAL_API_TOKEN" -fsS --max-time 5 -X POST "http://${APP_HOST}:${APP_PORT}/api/internal/house-question" \
     -H 'Content-Type: application/json' \
-    --data-binary "$1" >/dev/null 2>&1 || printf '%s loop: house question notification failed\n' "$(date -Iseconds)" >> "$LOG"
+    --data-binary "$1" >/dev/null 2>&1 || {
+      printf '%s loop: house question notification failed\n' "$(date -Iseconds)" >> "$LOG"
+      return 1
+    }
 }
 
 loop_question_discard() {
@@ -146,14 +207,70 @@ loop_question_discard() {
 loop_question_clear() {
   loop_question_discard
   if [ -n "${LOOP_QUESTION_ID:-}" ]; then
-    loop_question_notify "{\"action\":\"resolved\",\"id\":\"$LOOP_QUESTION_ID\"}"
+    LOOP_QUESTION_RESOLVING="{\"action\":\"resolved\",\"id\":\"$LOOP_QUESTION_ID\"${LOOP_QUESTION_INSTANCE:+,\"instance\":\"$LOOP_QUESTION_INSTANCE\"}}"
+    loop_question_flush
   fi
   LOOP_QUESTION_ID=""
+  LOOP_QUESTION_INSTANCE=""
+}
+
+# A failed close is retried; instance matching prevents it closing a replacement.
+loop_question_flush() {
+  [ -n "${LOOP_QUESTION_RESOLVING:-}" ] || return 0
+  if loop_question_notify "$LOOP_QUESTION_RESOLVING"; then LOOP_QUESTION_RESOLVING=""; fi
+}
+
+# Read Linux process state/start time without parsing spaces in the comm field.
+loop_dialog_process_stamp() {
+  local stat
+  local -a fields
+  IFS= read -r stat < "/proc/$1/stat" 2>/dev/null || return 1
+  read -ra fields <<< "${stat##*) }"
+  printf '%s %s\n' "${fields[0]}" "${fields[19]}"
+}
+
+# The PID start time prevents PID reuse; a fixed tmux pane is selected at launch.
+loop_dialog_owner_alive() {
+  [ -n "${LOOP_CLAUDE_PID:-}" ] || return 0
+  kill -0 "$LOOP_CLAUDE_PID" 2>/dev/null || return 1
+  local stamp state
+  read -r state stamp < <(loop_dialog_process_stamp "$LOOP_CLAUDE_PID")
+  [ "$state" != Z ] && [ -n "$stamp" ] && [ "$stamp" = "$LOOP_CLAUDE_STAMP" ]
 }
 
 loop_question_reset() {
   loop_question_discard
-  loop_question_notify '{"action":"reset"}'
+  # The parent serializes stop/wait/reset before a successor can publish. Local
+  # cleanup also works when the app is unreachable; browsers poll the same state.
+  loop_question_notify '{"action":"reset"}' || true
+  if [ -n "${EMBERVY_HOME:-}" ]; then
+    # Preserve a permission card even when reset could not reach the app. The
+    # parent has stopped the observer before resetting or launching a successor.
+    python3 - "$EMBERVY_HOME/state" <<'PY'
+import json, os, sys, tempfile
+root = sys.argv[1]
+current = os.path.join(root, "house-question.json")
+try:
+    with open(current) as f: q = json.load(f)
+    if q.get("permission") is True:
+        path = os.path.join(root, "house-question-history.json")
+        try:
+            with open(path) as f: history = json.load(f)
+        except FileNotFoundError: history = []
+        if not any(old.get("id") == q.get("id") and old.get("instance") == q.get("instance") for old in history):
+            q["closed"] = True
+            fd, temporary = tempfile.mkstemp(dir=root, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f: json.dump(history+[q], f)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
+except (OSError, ValueError, AttributeError, TypeError): pass
+finally:
+    try: os.unlink(current)
+    except FileNotFoundError: pass
+PY
+  fi
 }
 
 loop_dialog_waiting() {
@@ -163,20 +280,40 @@ loop_dialog_waiting() {
 }
 
 loop_question_wait() {
-  local pane="$1" target="$2" question id number fresh file
+  local pane="$1" target="$2" question id number fresh file now=${LOOP_STARTUP_NOW:-$SECONDS}
   local -a keys
-  question=$(loop_dialog_question "$pane")
+  question=$(loop_dialog_question "$pane" "${LOOP_DIALOG_PARSE_MODE:-question}")
   [ "$question" != null ] || return 1
   id=$(printf '%s' "$question" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
   [ "${LOOP_QUESTION_ANSWERED:-}" != "$id" ] || return 1
   LOOP_QUESTION_ANSWERED=""
+  # Each observed occurrence gets a new instance; only the server expires cards.
+  # An unchanged start question keeps startup paused and remains answerable in TUI.
   if [ "${LOOP_QUESTION_ID:-}" != "$id" ]; then
     LOOP_QUESTION_ID="$id"
-    loop_question_notify "{\"action\":\"pending\",\"question\":$question}"
+    LOOP_QUESTION_POSTED=""
+    LOOP_QUESTION_ATTEMPT=""
+    if [ -n "${LOOP_QUESTION_GENERATION:-}" ]; then
+      LOOP_QUESTION_SEQUENCE=$((${LOOP_QUESTION_SEQUENCE:-0} + 1))
+      LOOP_QUESTION_INSTANCE="$LOOP_QUESTION_GENERATION:$LOOP_QUESTION_SEQUENCE"
+    fi
+  fi
+  if [ -n "${LOOP_QUESTION_INSTANCE:-}" ]; then
+    question=$(printf '%s' "$question" | python3 -c 'import sys,json; q=json.load(sys.stdin); q["instance"]=sys.argv[1]; print(json.dumps(q))' "$LOOP_QUESTION_INSTANCE")
+  fi
+  # Retry failed transport every five seconds, without extending a card lifetime.
+  if [ -z "${LOOP_QUESTION_POSTED:-}" ] && { [ -z "${LOOP_QUESTION_ATTEMPT:-}" ] || [ $((now - LOOP_QUESTION_ATTEMPT)) -ge 5 ]; }; then
+    LOOP_QUESTION_ATTEMPT=$now
+    if loop_question_notify "{\"action\":\"pending\",\"question\":$question}"; then LOOP_QUESTION_POSTED=1; fi
   fi
   loop_dialog_waiting
   file="${EMBERVY_HOME:-}/state/house-question-answer.json"
   [ -n "${EMBERVY_HOME:-}" ] && [ -f "$file" ] || return 1
+  # Coordinate with birth, cut and cache-ping writers. Never hold this while waiting for a person.
+  local input_fd
+  exec {input_fd}>"$EMBERVY_HOME/state/claude-input.lock" || return 1
+  flock -n "$input_fd" || { exec {input_fd}>&-; return 1; }
+  loop_dialog_owner_alive || { exec {input_fd}>&-; loop_question_clear; return 1; }
   # Consume before touching the terminal: malformed or stale answers cannot be retried.
   number=$(python3 -c '
 import json, sys, os
@@ -184,17 +321,17 @@ try:
     with open(sys.argv[1]) as f: answer = json.load(f)
     q = json.loads(sys.argv[2])
     n = answer.get("number")
-    if answer.get("id") == q["id"]:
+    if answer.get("id") == q["id"] and answer.get("instance") == q.get("instance"):
         if q.get("enter") is True and q["options"] == []:
-            if set(answer) == {"id", "enter"} and answer.get("enter") is True: print("Enter")
+            if set(answer) == ({"id", "enter", "instance"} if "instance" in q else {"id", "enter"}) and answer.get("enter") is True: print("Enter")
         elif "enter" not in answer and type(n) is int and n in [o["number"] for o in q["options"]]: print(n)
 except (ValueError, OSError, AttributeError): pass
 finally:
     try: os.unlink(sys.argv[1])
     except FileNotFoundError: pass
 ' "$file" "$question")
-  fresh=$(tmux capture-pane -t "$target" -p -J 2>/dev/null) || fresh=""
-  fresh=$(loop_dialog_question "$fresh")
+  fresh=$(tmux capture-pane -J -t "$target" -p 2>/dev/null) || fresh=""
+  fresh=$(loop_dialog_question "$fresh" "${LOOP_DIALOG_PARSE_MODE:-question}")
   # Recheck the menu before planning keys; cursor movement alone does not change its identity.
   mapfile -t keys < <(python3 -c '
 import json, sys
@@ -203,7 +340,8 @@ try:
     answer = sys.argv[3]
     if not isinstance(fresh, dict): sys.exit()
     selected = fresh.get("selected")
-    if {k: v for k, v in question.items() if k != "selected"} != {k: v for k, v in fresh.items() if k != "selected"}: sys.exit()
+    if {k: v for k, v in question.items() if k not in ("selected", "instance", "deadlineAt")} != {k: v for k, v in fresh.items() if k not in ("selected", "deadlineAt")}: sys.exit()
+    if fresh.get("deadlineAt", float("inf")) <= __import__("time").time()*1000: sys.exit()
     if answer == "Enter" and fresh.get("enter") is True:
         keys = ["Enter"]
     elif answer.isdigit() and int(answer) in [o["number"] for o in fresh["options"]]:
@@ -218,14 +356,17 @@ try:
 except (ValueError, TypeError, KeyError): pass
 ' "$question" "$fresh" "$number")
   if [ "${#keys[@]}" -gt 0 ]; then
-    if tmux send-keys -t "$target" "${keys[@]}" 2>/dev/null; then
+    if loop_dialog_owner_alive && tmux send-keys -t "$target" "${keys[@]}" 2>/dev/null; then
+      exec {input_fd}>&-
       printf '%s loop: house question answered\n' "$(date -Iseconds)" >> "$LOG"
       LOOP_QUESTION_ANSWERED="$id"
       loop_question_clear
       return 1
     fi
   fi
+  exec {input_fd}>&-
   printf '%s loop: house question answer discarded\n' "$(date -Iseconds)" >> "$LOG"
+  loop_question_clear
   return 1
 }
 
@@ -298,6 +439,31 @@ loop_dialog_continue() {
   return 1
 }
 
+# Lifetime observation has a one-way transition out of startup. No generic parser,
+# unknown-screen discovery or development automation runs after that transition.
+loop_dialog_observe() {
+  local pane="$1" target="$2" KIND
+  loop_question_flush
+  if [ -z "${LOOP_STARTUP_FINISHED:-}" ]; then
+    KIND=$(loop_dialog_kind "$pane")
+    loop_unknown_watch "$pane" "$target" "$KIND"
+    if loop_dialog_continue "$KIND"; then
+      loop_dialog_step "$pane" "$target" "$KIND" || true
+      return
+    fi
+    LOOP_STARTUP_FINISHED=1
+    LOOP_UNKNOWN_CARD=""
+    loop_question_clear
+  fi
+  LOOP_DIALOG_PARSE_MODE=permission
+  if [ "$(loop_dialog_question "$pane" permission)" != null ]; then
+    loop_question_wait "$pane" "$target" || true
+  else
+    LOOP_QUESTION_ANSWERED=""
+    loop_question_clear
+  fi
+}
+
 # Return success after handling the automatic dialog; the poller still watches for later questions.
 loop_dialog_step() {
   local pane="$1" target="$2" kind
@@ -310,6 +476,7 @@ loop_dialog_step() {
   loop_question_clear
   [ -z "${LOOP_DEVELOPMENT_DONE:-}" ] || return 1
   # The default may be Exit, so select the numbered affirmative option first.
+  loop_dialog_owner_alive || return 1
   tmux send-keys -t "$target" 1 2>/dev/null || return 1
   LOOP_DEVELOPMENT_DONE=1
   sleep 0.5
@@ -319,6 +486,7 @@ loop_dialog_step() {
     development)
       # Alternation keeps the multibyte selection marker intact in the C locale.
       if printf '%s\n' "$pane" | grep -qE '^[[:space:]]*(❯|>)[[:space:]]*1[.)][[:space:]]+I am using this for local development'; then
+        loop_dialog_owner_alive || return 0
         tmux send-keys -t "$target" Enter 2>/dev/null || return 0
         printf '%s loop: confirmed explicitly selected development-channels option 1\n' "$(date -Iseconds)" >> "$LOG"
       else

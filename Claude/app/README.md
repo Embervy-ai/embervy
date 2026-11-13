@@ -10,6 +10,10 @@ The PWA in `public/` is generic — login + chat + WebSocket + push + image /
 voice upload + reactions + settings. Nothing in `public/` is specific to one
 user.
 
+## Kept messages
+
+Use the bookmark in a message's long-press or right-click menu (or its actions button, a keyboard path that appears on keyboard focus) to keep a copy for later; the app briefly confirms when it is kept. Use the **bookmark button in the header** to open Kept and read or remove copies, even after the original leaves the chat window. The private list lives on your own server in `data/kept.json`, not in the agent's context. It holds up to 200 messages of 20,000 characters each; local voice recordings remain playable while their files exist. The agent's `add_to_kept` tool can only add a passage you ask it to keep, never read or remove entries.
+
 ## Language
 
 The app is English by default. The chat, settings, login and file viewer

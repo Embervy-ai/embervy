@@ -23,7 +23,7 @@ test("secret comparison always compares two fixed-length digests", () => {
 test("mail is a labelled foreign bubble and remote reply images are links", () => {
   const pure = app.slice(app.indexOf("  function escapeHtml(text) {"), app.indexOf("  function appearanceTextColors(background) {"));
   const markdown = app.slice(app.indexOf("  function renderMarkdown(text) {"), app.indexOf("  const approvalStates = new Map();"));
-  const add = app.slice(app.indexOf("  function addMessage(role,"), app.indexOf("  function addVoiceMessage(role,"));
+  const add = app.slice(app.indexOf("  function createMessageBubble("), app.indexOf("  function addVoiceMessage(role,"));
   const nodes: any[] = [];
   const document = { createElement: () => ({ className: "", innerHTML: "", setAttribute() {}, addEventListener() {} }) };
   const render = new Function("document", "nodes", `
@@ -32,7 +32,7 @@ test("mail is a labelled foreign bubble and remote reply images are links", () =
     const window = {};
     const messageIds = new Set();
     let lastSeenTs = "", workingEl = null;
-    const showTyping = () => {}, atBottom = () => true, scrollToBottom = () => {};
+    const showTyping = () => {}, atBottom = () => true, scrollToBottom = () => {}, addKeptActions = () => {};
     const messagesEl = { appendChild: node => nodes.push(node) };
     ${pure}\n${markdown}\n${add}
     return addMessage;

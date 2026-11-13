@@ -1,13 +1,95 @@
 /* Embervy App — light, warm, readable */
 
+/* No animation: confirmations stay still, including with reduced motion. */
+.confirmation-status {
+  position: fixed;
+  left: 50%;
+  transform: translate(-50%, -100%);
+  z-index: 200;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 14px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  animation: none;
+  transition: none;
+}
+.confirmation-status:empty { opacity: 0; }
+#kept-dialog button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; min-height: 44px; cursor: pointer; }
+#kept-dialog { margin: auto; width: min(640px, calc(100% - 24px)); max-height: calc(100dvh - 32px); padding: 16px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; overscroll-behavior: contain; }
+#kept-dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.kept-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+#kept-status:not(:empty) { margin: 12px 0; }
+#kept-body { display: flex; flex-direction: column; gap: 12px; overflow-wrap: anywhere; }
+.kept-row { border-bottom: 1px solid var(--border); padding: 12px 0; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+#kept-dialog .kept-open { display: block; width: 100%; text-align: left; }
+.kept-meta { display: block; font-size: .85em; margin-bottom: 6px; }
+.kept-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+#kept-dialog .kept-content { max-width: 100%; width: 100%; margin: 0; user-select: text; -webkit-user-select: text; }
+#kept-dialog .kept-content pre { overflow-x: auto; }
+#kept-dialog audio { width: 100%; }
+#kept-dialog small { color: var(--text-light); }
+#kept-dialog .kept-copy { background: transparent; border: 0; margin: 0; padding: 0; }
+#kept-dialog .kept-copy .copybox-btn { position: static; }
+.kept-marker { display: inline-flex; vertical-align: middle; margin: 0 4px; color: inherit; }
+/* Keep the native button in the tab order, but out of the bubble's layout.
+   Only keyboard-visible focus reveals it; touch/hover must not add a row. */
+.message .message-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  cursor: pointer;
+}
+.message .message-actions:focus-visible {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 8px;
+  overflow: visible;
+  clip: auto;
+  clip-path: none;
+  white-space: normal;
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  z-index: 2;
+}
+#kept-dialog :focus-visible, .message-actions:focus-visible, .emoji-picker button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@media (max-width: 480px) { #kept-dialog { width: calc(100% - 12px); padding: 12px; } }
+
+
 .approval-card { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
 /* Nested cards use the enclosing bubble once, so translucent surfaces do not stack. */
 .message .approval-card { background: transparent; color: inherit; }
 .message .emoji-picker { background: transparent; color: inherit; }
 .approval-head, .approval-title { font-weight: 600; margin-bottom: 8px; overflow-wrap: anywhere; }
-.approval-detail { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 20rem; overflow: auto; margin-bottom: 12px; }
+.approval-detail { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-family: "SF Mono", "Fira Code", monospace; font-size: .9em; max-height: 20rem; overflow: auto; margin-bottom: 12px; }
 .approval-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
-.approval-actions button { padding: 10px 18px; min-height: 44px; border: 1px solid currentColor; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.approval-actions button { padding: 10px 18px; min-height: 44px; max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; border: 1px solid currentColor; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .approval-actions .approval-allow { background: var(--accent); color: var(--on-accent); }
 .approval-actions button:disabled { opacity: .6; cursor: wait; }
 .approval-actions button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
@@ -59,7 +141,21 @@ html, body {
 /* Inline legacy activity colour is outside the appearance code's edit scope. */
 #agent-working { color: var(--text-light) !important; }
 /* Native button text does not inherit the body colour. */
-#notes-btn { color: var(--text-light); background: none; border: 0; }
+#notes-btn, #kept-btn {
+  color: var(--text-light);
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+#notes-btn:focus-visible, #kept-btn:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
 /* --- Header --- */
 header {
@@ -174,6 +270,7 @@ header h1 {
 /* Touch keeps long presses for the picker; a fine primary pointer allows native
    selection and opens the same picker with a right click. */
 .message {
+  position: relative;
   max-width: 85%;
   margin-bottom: 12px;
   padding: 12px 16px;
@@ -1166,7 +1263,7 @@ header h1 {
 .brain-menu-msg.error { background: rgba(211, 47, 47, 0.1); color: #b71c1c; }
 
 /* Mail must remain readable in full, even when the body contains long unbroken lines. */
-.approval-card[data-email] .approval-detail { white-space: pre-wrap; overflow-wrap: anywhere; max-height: none; }
+.approval-card[data-email] .approval-detail { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; max-height: none; }
 .approval-card[data-email] button:disabled { opacity: 0.5; cursor: wait; }
 
 .doctor-seen {
@@ -1316,10 +1413,17 @@ header h1 {
   background: rgba(255, 255, 255, 0.25);
 }
 
-.house-question-card { align-self: flex-start; max-width: 100%; margin: 8px 0; }
-.house-question-card .approval-actions { flex-wrap: wrap; }
-.house-question-card button { min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
-.house-question-card button:disabled { opacity: 0.6; cursor: default; }
+.house-question-card .approval-detail { max-height: 50vh; }
+/* Structured permission text grows with the page; only the legacy detail scrolls. */
+.house-permission-detail { min-width: 0; overflow-wrap: anywhere; margin-bottom: 12px; }
+.house-permission-eyebrow { font-size: .8em; margin: 0 0 4px; }
+.house-permission-detail .approval-title { margin-top: 0; }
+.house-permission-detail .approval-detail { max-height: none; overflow: visible; }
+.house-permission-context, .house-permission-warning { margin: 0 0 12px; }
+.house-permission-warning { border-inline-start: 3px solid currentColor; padding: 8px 12px; }
+.house-permission-prompt { margin: 0; }
+.house-permission-hint, .house-permission-deadline { font-size: .9em; margin: 4px 0; }
+.house-permission-deadline { font-weight: 600; }
 .claude-auth-card { margin: 8px 12px; }
 .claude-auth-card p { margin: 0 0 8px; }
 .claude-auth-card a { display: inline-block; margin: 4px 0 10px; font-weight: 600; color: inherit; }

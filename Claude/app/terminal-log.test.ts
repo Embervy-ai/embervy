@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readAssetStamp } from "./test-asset-stamps";
 import {
   brainLogEntries,
   claudeLogEntries,
@@ -384,9 +385,8 @@ test("server range selection pages a growing source strictly backwards and fills
 test("the page and service worker request the same app.js version", () => {
   const page = readFileSync(join(import.meta.dir, "public", "index.html"), "utf8");
   const worker = readFileSync(join(import.meta.dir, "public", "sw.js"), "utf8");
-  const version = (text: string) => text.match(/\/app\.js\?v=(\d+)/)?.[1];
-  expect(version(page)).toBeDefined();
-  expect(version(worker)).toBe(version(page));
+  expect(readAssetStamp(page, "app.js")).toBeDefined();
+  expect(readAssetStamp(worker, "app.js")).toBe(readAssetStamp(page, "app.js"));
 });
 
 // Exercise the shipped client rather than a second implementation of its paging rules.

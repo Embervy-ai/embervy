@@ -48,6 +48,22 @@ misunderstandings and a confused agent. They do not stop an agent that
 decides to go around them: root can change the app, its state or its
 credentials and use other paths.
 
+On the Claude Code path, Claude Code starts in Auto mode and makes its own
+permission decisions. Recognised permission questions are relayed as app cards
+throughout the session, with the command and literal choices, including persistent
+permissions. Complete framed Bash menus with three or four choices are supported;
+other forms require the terminal. These cards are not a security lock or a
+replacement for Claude Code's own checks. Only a signed-in human session can
+answer through this route; process and question-instance checks reject stale
+answers. Screen capture and terminal input are not atomic, so simultaneous
+terminal input remains a race. Cards expire after 24 hours; a still-visible
+unanswered question gets a new instance. Notification failures are retried.
+Auto-mode confirmations have a shorter deadline, shown on the card. Claude Code
+waits only briefly and then blocks the request itself. Cards notify through the
+existing app push path when they appear. An unanswered permission card remains
+in the history, closed and without buttons; an answered card retains the choice.
+Closed cards cannot submit answers.
+
 ## What the app refuses to do
 
 - Start with `APP_PASSWORD` set but `APP_SESSION_SECRET` empty (would

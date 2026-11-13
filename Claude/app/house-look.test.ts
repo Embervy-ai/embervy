@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readAssetStamp, readAssetUrl, readCacheNumber } from "./test-asset-stamps";
 
 const read = (name: string) => readFileSync(join(import.meta.dir, name), "utf8");
 const settings = read("public/settings.js");
@@ -185,14 +186,14 @@ test("nested card details and secondary actions inherit readable text without st
 
 test("chat asset versions and the offline cache advance together", () => {
   const index = read("public/index.html"), settings = read("public/settings.html"), worker = read("public/sw.js");
-  const style = /\/style\.css\?v=(\d+)/.exec(index)!;
-  const script = /\/app\.js\?v=(\d+)/.exec(index)!;
-  expect(Number(style[1])).toBeGreaterThan(116);
-  expect(Number(script[1])).toBeGreaterThan(129);
-  expect(settings).toContain(style[0]);
-  expect(worker).toContain(style[0]);
-  expect(worker).toContain(script[0]);
-  expect(Number(/const CACHE_NAME = "embervy-v(\d+)(?:-h\d+)?"/.exec(worker)![1])).toBeGreaterThan(45);
+  const style = readAssetUrl(index, "style.css");
+  const script = readAssetUrl(index, "app.js");
+  expect(readAssetStamp(index, "style.css")).toBeGreaterThan(116);
+  expect(readAssetStamp(index, "app.js")).toBeGreaterThan(129);
+  expect(readAssetUrl(settings, "style.css")).toBe(style);
+  expect(readAssetUrl(worker, "style.css")).toBe(style);
+  expect(readAssetUrl(worker, "app.js")).toBe(script);
+  expect(readCacheNumber(worker)).toBeGreaterThan(45);
 });
 
 test("non-object stores do not become appearance choices", () => {

@@ -22,7 +22,7 @@ function dialogPoller() {
   const end = source.indexOf("\n  ) &", start);
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
-  return { source, body: source.slice(start, end) };
+  return { source, body: `DIALOG_TARGET=%42\n${source.slice(start, end)}` };
 }
 
 test("dialog poller resumes after a long human question and confirms only development", () => {
@@ -31,6 +31,7 @@ test("dialog poller resumes after a long human question and confirms only develo
     LOG=/dev/stdout
     LOOP_STARTUP_NOW=0
     sleeps=0
+    loop_dialog_owner_alive() { [ "$sleeps" -lt 7 ]; }
     sleep() {
       sleeps=$((sleeps+1))
       case "$sleeps" in
@@ -57,18 +58,19 @@ test("dialog poller resumes after a long human question and confirms only develo
   expect(result.exitCode).toBe(0);
   expect(result.stderr.toString()).toBe("");
   const output = result.stdout.toString();
-  expect(output).toContain("SLEEPS:6");
+  expect(output).toContain("SLEEPS:7");
   expect(output.split("\n").filter(line => line.startsWith("KEY:"))).toEqual(["KEY:1", "KEY:Enter"]);
   expect(output).toContain("confirmed explicitly selected development-channels option 1");
   expect(output).toContain("timed out after 180s");
   expect(output.split("\n").filter(line => line.startsWith("REQUEST:"))).toHaveLength(2);
 });
 
-test("dialog poller expires normally without questions or when screen capture fails", () => {
+test("startup expires without questions or capture while the observer waits for process exit", () => {
   const { body } = dialogPoller();
   for (const fail of [false, true]) {
     const result = Bun.spawnSync(["bash", "-c", `source "$1"
       LOG=/dev/stdout; LOOP_STARTUP_NOW=0; sleeps=0
+      loop_dialog_owner_alive() { [ "$sleeps" -lt 3 ]; }
       sleep() { sleeps=$((sleeps+1)); LOOP_STARTUP_NOW=$((sleeps * 90)); }
       tmux() { ${fail ? "return 1" : "printf 'Starting Claude Code'"}; }
       ${body}
@@ -76,7 +78,7 @@ test("dialog poller expires normally without questions or when screen capture fa
     `, "fixture", join(import.meta.dir, "loop-dialog.sh")], { env: { PATH: "/usr/bin:/bin", TMUX_SESSION: "test" }, timeout: 5000 });
     expect(result.exitCode).toBe(0);
     expect(result.stderr.toString()).toBe("");
-    expect(result.stdout.toString()).toContain("SLEEPS:2");
+    expect(result.stdout.toString()).toContain("SLEEPS:3");
     expect(result.stdout.toString()).toContain("dialog poller timed out after 180s");
   }
 });
@@ -86,6 +88,7 @@ test("dialog poller publishes one unknown card without typing and resolves it on
   const result = Bun.spawnSync(["bash", "-c", `source "$1"
     LOG=/dev/stdout; LOOP_STARTUP_NOW=0; sleeps=0
     embervy_pane_has_claude() { return 0; }
+    loop_dialog_owner_alive() { [ "$sleeps" -lt 7 ]; }
     sleep() {
       sleeps=$((sleeps+1))
       case "$sleeps" in
@@ -112,7 +115,7 @@ test("dialog poller publishes one unknown card without typing and resolves it on
   expect(requests[0].question.text).toContain("May this house borrow a moon?\nPress any key");
   expect(requests[1]).toEqual({ action: "resolved", id: requests[0].question.id });
   expect(output).not.toContain("KEY:");
-  expect(output).toContain("SLEEPS:6");
+  expect(output).toContain("SLEEPS:7");
 });
 
 test("process-exit cleanup stops a poller paused on a human question and resets its card", () => {
@@ -144,6 +147,98 @@ test("process-exit cleanup stops a poller paused on a human question and resets 
     expect(result.stdout.toString()).not.toContain("timed out");
     expect(source).toContain("  loop_question_reset\n  (");
     expect(source).toContain('    DIALOG_POLLER_PID=""\n    loop_question_reset');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("the process observer relays a question after thirty minutes, then a new identical occurrence", () => {
+  const { body, source } = dialogPoller();
+  const home = mkdtempSync(join(tmpdir(), "permission-lifetime-"));
+  mkdirSync(join(home, "state"));
+  const pane = readFileSync(join(import.meta.dir, "../app/test-fixtures/panes/permission-question.txt"), "utf8");
+  try {
+    const result = Bun.spawnSync(["bash", "-c", `source "$1"
+      LOG="$EMBERVY_HOME/loop.log"; LOOP_STARTUP_NOW=0; sleeps=0; LOOP_QUESTION_GENERATION=process-one
+      loop_dialog_owner_alive() { [ "$sleeps" -lt 8 ]; }
+      sleep() {
+        sleeps=$((sleeps+1))
+        case "$sleeps" in
+          1) LOOP_STARTUP_NOW=90;; 2) LOOP_STARTUP_NOW=180;;
+          *) LOOP_STARTUP_NOW=$((1797+sleeps));;
+        esac
+        if [ "$sleeps" = 4 ]; then
+          python3 -c 'import json,sys; q=json.load(open(sys.argv[1])); json.dump({"id":q["id"],"instance":q["instance"],"number":4},open(sys.argv[2],"w"))' "$EMBERVY_HOME/pending" "$EMBERVY_HOME/state/house-question-answer.json"
+        fi
+      }
+      loop_question_notify() {
+        printf 'REQUEST:%s\\n' "$1"
+        printf '%s' "$1" | python3 -c 'import json,sys; r=json.load(sys.stdin); r.get("action")=="pending" and json.dump(r["question"],open(sys.argv[1],"w"))' "$EMBERVY_HOME/pending"
+      }
+      tmux() {
+        if [ "$1" = send-keys ]; then shift 3; printf 'KEY:%s\\n' "$@"; return; fi
+        case "$sleeps" in 3|4|6|7) printf '%s' "$PERMISSION";; *) printf '──────────\\n❯ \\n──────────';; esac
+      }
+      ${body}
+      echo DONE:$sleeps
+      cat "$LOG"
+    `, "fixture", join(import.meta.dir, "loop-dialog.sh")], { env: { PATH: "/usr/bin:/bin", EMBERVY_HOME: home, PERMISSION: pane }, stdout: "pipe", stderr: "pipe", timeout: 10000 });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr.toString()).toBe("");
+    const output = result.stdout.toString();
+    expect(output).toContain("DONE:8");
+    expect(output).toContain("timed out after 180s");
+    const requests = output.split("\n").filter(line => line.startsWith("REQUEST:")).map(line => JSON.parse(line.slice(8)));
+    const pending = requests.filter(r => r.action === "pending");
+    expect(pending.map(r => r.question.instance)).toEqual(["process-one:1", "process-one:2"]);
+    expect(pending[0].question.id).toBe(pending[1].question.id);
+    expect(pending[0].question.text).toContain("touch b.txt");
+    expect(output.split("\n").filter(line => line.startsWith("KEY:"))).toEqual(["KEY:4", "KEY:Enter"]);
+    expect(requests.at(-1)).toMatchObject({ action: "resolved", instance: "process-one:2" });
+    expect(source).toContain('wait "$LOOP_CLAUDE_PID"');
+    expect(source.indexOf("  stop_dialog_poller", source.indexOf('wait "$LOOP_CLAUDE_PID"\n'))).toBeGreaterThan(0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("process binding rejects exited processes and a reused PID with a different start stamp", () => {
+  const result = Bun.spawnSync(["bash", "-c", `source "$1"
+    /bin/sleep 60 & LOOP_CLAUDE_PID=$!
+    trap 'kill "$LOOP_CLAUDE_PID" 2>/dev/null; wait "$LOOP_CLAUDE_PID" 2>/dev/null' EXIT
+    read -r _ LOOP_CLAUDE_STAMP < <(loop_dialog_process_stamp "$LOOP_CLAUDE_PID")
+    loop_dialog_owner_alive; echo ALIVE:$?
+    stamp=$LOOP_CLAUDE_STAMP; LOOP_CLAUDE_STAMP=wrong
+    loop_dialog_owner_alive; echo REUSED:$?
+    LOOP_CLAUDE_STAMP=$stamp
+    kill "$LOOP_CLAUDE_PID"; wait "$LOOP_CLAUDE_PID" 2>/dev/null
+    loop_dialog_owner_alive; echo DEAD:$?
+    trap - EXIT
+  `, "fixture", join(import.meta.dir, "loop-dialog.sh")], { env: { PATH: "/usr/bin:/bin" }, timeout: 5000 });
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("ALIVE:0");
+  expect(result.stdout.toString()).toContain("REUSED:1");
+  expect(result.stdout.toString()).toContain("DEAD:1");
+});
+
+test("the observed CLI keeps stdin, arguments, PID and interrupt handling", () => {
+  const source = readFileSync(join(import.meta.dir, "start-claude-loop.sh"), "utf8");
+  const start = source.indexOf("  python3 -c '\nimport os, signal, sys");
+  const end = source.indexOf("\n  LOOP_CLAUDE_PID=$!", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const home = mkdtempSync(join(tmpdir(), "observed-cli-"));
+  try {
+    writeFileSync(join(home, "claude"), `#!/usr/bin/python3
+import os, signal, sys, json
+print(json.dumps({"pid":os.getpid(),"stdin":sys.stdin.readline().strip(),"args":sys.argv[1:],"token":os.environ.get("EMBERVY_MAIN_BRIDGE_TOKEN"),"interrupt":signal.getsignal(signal.SIGINT)!=signal.SIG_IGN}), flush=True)
+`, { mode: 0o755 });
+    const result = Bun.spawnSync(["bash", "-c", `
+      MAIN_BRIDGE_TOKEN_FILE="$HOME/token"; printf '%s\\n' bridge > "$MAIN_BRIDGE_TOKEN_FILE"
+      CLAUDE_ARGS=(--continue); PASS_ARGS=('two words')
+      ${source.slice(start, end)}
+      pid=$!; wait "$pid"; echo PID:$pid
+    `], { env: { PATH: `${home}:/usr/bin:/bin`, HOME: home }, stdin: Buffer.from("terminal input\n"), stdout: "pipe", stderr: "pipe", timeout: 5000 });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr.toString()).toBe("");
+    const [json, pid] = result.stdout.toString().trim().split("\n");
+    expect(JSON.parse(json)).toEqual({ pid: Number(pid.slice(4)), stdin: "terminal input", args: ["--continue", "two words"], token: "bridge", interrupt: true });
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

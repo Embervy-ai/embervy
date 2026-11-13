@@ -19,6 +19,7 @@ import { createHash, timingSafeEqual as bufferTimingSafeEqual } from "node:crypt
 import { Hono } from "hono";
 import { boundedRequest, REQUEST_BODY_MAX } from "./request-body";
 import { JsonlHistory } from "./jsonl-history";
+import { KeptStore, KeptError, keptAudioUrl } from "./kept";
 import { applyDoctorMutes, parseDoctorMutes, pruneDoctorMutes, rawDoctorStatus, validDoctorId, doctorRegressed, DOCTOR_MUTE_MS, type DoctorMutes } from "./doctor-mute";
 import { serveStatic } from "hono/bun";
 import { checkEmailBlacklist } from "./config/email-blacklist";
@@ -977,6 +978,20 @@ app.use("*", async (c, publicNext) => {
     }
   };
 
+  // Kept belongs to the person, even in local/dev mode; the agent has only an append door.
+  if (path === "/api/kept" || path.startsWith("/api/kept/")) {
+    if (!await isHumanSession(c)) return c.json({ error: S("kept.unauthorized") }, 401);
+    c.header("Cache-Control", "private, no-store");
+    return next();
+  }
+  if (path === "/api/internal/keep" || path.startsWith("/api/internal/keep/")) {
+    if (!INTERNAL_API_TOKEN || !bearerMatches(c.req.header("authorization") || "", INTERNAL_API_TOKEN)) {
+      return c.json({ error: S("kept.unauthorized") }, 401);
+    }
+    c.header("Cache-Control", "private, no-store");
+    return next();
+  }
+
   // This preference never inherits agent, local or developer trust.
   if (path === "/api/approval-settings" || path === "/api/mailbox-write/settings") {
     if (!await isHumanSession(c)) return c.json({ error: S("email.humanRequired") }, 403);
@@ -1110,12 +1125,29 @@ const EMBERVY_HOME_DIR = envValue("EMBERVY_HOME") || process.cwd().replace(/\/Cl
 // House question routes keep terminal choices separate from chat input.
 const HOUSE_QUESTION_FILE = join(EMBERVY_HOME_DIR, "state", "house-question.json");
 const HOUSE_ANSWER_FILE = join(EMBERVY_HOME_DIR, "state", "house-question-answer.json");
-type HouseQuestion = { id: string; text: string; options: { number: number; label: string }[]; enter?: true; readonly?: true; expiresAt: number };
-function readHouseQuestion(): HouseQuestion | null {
-  try {
-    const q = JSON.parse(readFileSync(HOUSE_QUESTION_FILE, "utf8"));
-    return q && q.expiresAt > Date.now() ? q : null;
-  } catch { return null; }
+const HOUSE_QUESTION_HISTORY_FILE = join(EMBERVY_HOME_DIR, "state", "house-question-history.json");
+type HouseQuestion = { id: string; instance?: string; permission?: true; submitted?: boolean; answerLabel?: string; closed?: true; text: string; options: { number: number; label: string }[]; enter?: true; readonly?: true; deadlineAt?: number; expiresAt: number };
+function readHouseQuestionHistory(): HouseQuestion[] {
+  try { return JSON.parse(readFileSync(HOUSE_QUESTION_HISTORY_FILE, "utf8")); } catch { return []; }
+}
+function readHouseQuestion(includeExpired = false): HouseQuestion | null {
+  let q: HouseQuestion;
+  try { q = JSON.parse(readFileSync(HOUSE_QUESTION_FILE, "utf8")); } catch { return null; }
+  if (!q) return null;
+  if (!includeExpired && (q.expiresAt <= Date.now() || (q.deadlineAt !== undefined && q.deadlineAt <= Date.now()))) {
+    closeHouseQuestion(q);
+    return null;
+  }
+  return q;
+}
+function closeHouseQuestion(q: HouseQuestion | null) {
+  if (q?.permission === true) {
+    const history = readHouseQuestionHistory();
+    if (!history.some(old => old.id === q.id && old.instance === q.instance)) {
+      writeHouseQuestionState(HOUSE_QUESTION_HISTORY_FILE, [...history, { ...q, closed: true }]);
+    }
+  }
+  clearHouseQuestion();
 }
 function writeHouseQuestionState(file: string, data: unknown) {
   mkdirSync(join(EMBERVY_HOME_DIR, "state"), { recursive: true, mode: 0o700 });
@@ -1133,6 +1165,10 @@ function clearHouseQuestion() {
   }
 }
 function validHouseQuestion(q: any): boolean {
+  if (q && "instance" in q && (typeof q.instance !== "string" || q.instance !== q.instance.trim() || !/^[a-zA-Z0-9-]{1,80}:[1-9][0-9]{0,12}$/.test(q.instance))) return false;
+  if (q && ["submitted", "closed", "answerLabel", "expiresAt"].some(key => key in q)) return false;
+  if (q && "deadlineAt" in q && (q.permission !== true || !Number.isSafeInteger(q.deadlineAt) || q.deadlineAt <= 0)) return false;
+  if (q?.permission === true && !q.instance) return false;
   if (!q || typeof q.text !== "string" || !q.text || q.text.length > 12000 || !Array.isArray(q.options) || q.options.length > 29) return false;
   if ("enter" in q && (q.enter !== true || q.options.length !== 0)) return false;
   if (q.enter === true && q.text.split("\n").some((line: string) => /^(?:(?:❯|>)\s*)?[1-9][0-9]*\s*[.)]\s+.+$/.test(line))) return false;
@@ -1152,14 +1188,19 @@ app.post("/api/internal/house-question", async (c) => {
   if (!INTERNAL_API_TOKEN || !bearerMatches(c.req.header("authorization") || "", INTERNAL_API_TOKEN)) return c.json({ error: "unauthorized" }, 401);
   const body = await c.req.json().catch(() => null);
   if (body?.action === "reset") {
-    clearHouseQuestion();
+    closeHouseQuestion(readHouseQuestion(true));
   } else if (body?.action === "resolved") {
     if (typeof body.id !== "string") return c.json({ error: "question id required" }, 400);
-    if (readHouseQuestion()?.id === body.id) clearHouseQuestion();
+    const current = readHouseQuestion(true);
+    if (current?.id === body.id && current?.instance === body.instance) closeHouseQuestion(current);
   } else if (body?.action === "pending" && validHouseQuestion(body.question)) {
-    if (readHouseQuestion()?.id !== body.question.id) {
-      clearHouseQuestion();
+    const current = readHouseQuestion(true);
+    const closed = readHouseQuestionHistory().some(q => q.id === body.question.id && q.instance === body.question.instance);
+    if (!closed && (current?.id !== body.question.id || current?.instance !== body.question.instance)) {
+      closeHouseQuestion(current);
       writeHouseQuestionState(HOUSE_QUESTION_FILE, { ...body.question, expiresAt: Date.now() + 86400000 });
+      // Same delivery path as approval cards, immediately on a new occurrence.
+      void sendPushToAll(S("houseQuestion.heading"), body.question.text).catch(() => {});
     }
   } else {
     return c.json({ error: "invalid question" }, 400);
@@ -1170,19 +1211,24 @@ app.post("/api/internal/house-question", async (c) => {
 app.get("/api/house-question", async (c) => {
   if (!await isHumanSession(c)) return c.json({ error: "unauthorized" }, 401);
   c.header("Cache-Control", "no-store");
-  return c.json({ question: readHouseQuestion(), submitted: existsSync(HOUSE_ANSWER_FILE) });
+  const question = readHouseQuestion();
+  return c.json({ question, history: readHouseQuestionHistory(), submitted: question?.submitted === true || existsSync(HOUSE_ANSWER_FILE) });
 });
 app.post("/api/house-question/answer", async (c) => {
   if (!await isHumanSession(c)) return c.json({ error: "unauthorized" }, 401);
   const body = await c.req.json().catch(() => null);
   const q = readHouseQuestion();
   const validAnswer = q?.readonly === true ? false : q?.enter === true
-    ? q.options.length === 0 && body?.enter === true && Object.keys(body).length === 2
+    ? q.options.length === 0 && body?.enter === true && Object.keys(body).length === (q.instance ? 3 : 2)
     : body && !Object.hasOwn(body, "enter") && Number.isInteger(body.number) && q?.options.some(option => option.number === body.number);
-  if (!q || body?.id !== q.id || !validAnswer || existsSync(HOUSE_ANSWER_FILE)) {
+  if (!q || q.closed || body?.id !== q.id || body?.instance !== q.instance || !validAnswer || q.submitted || existsSync(HOUSE_ANSWER_FILE)) {
     return c.json({ error: "question or option no longer available" }, 409);
   }
-  writeHouseQuestionState(HOUSE_ANSWER_FILE, q.enter === true ? { id: q.id, enter: true } : { id: q.id, number: body.number });
+  // Persist the claim before publishing the answer. Consuming the answer file must
+  // not reopen a card to another device. A failed write fails closed until renewal.
+  writeHouseQuestionState(HOUSE_QUESTION_FILE, { ...q, submitted: true, answerLabel: q.enter === true ? S("houseQuestion.continue") : q.options.find(option => option.number === body.number)!.label });
+  const identity = { id: q.id, ...(q.instance ? { instance: q.instance } : {}) };
+  writeHouseQuestionState(HOUSE_ANSWER_FILE, q.enter === true ? { ...identity, enter: true } : { ...identity, number: body.number });
   broadcastToClients({ type: "house-question" });
   return c.json({ ok: true });
 });
@@ -1863,7 +1909,7 @@ app.post("/api/approval/:id/decide", async (c) => {
 // Filter before bounding the window so menu controls and foreign traffic cannot hide the person's messages.
 const inboxHistory = new JsonlHistory(INBOX, 200, m => m.type !== "reaction" && m.ui_origin !== "brain-menu" && !["room", "peer", "scheduled"].includes(m.source));
 const outboxHistory = new JsonlHistory(OUTBOX);
-app.get("/api/messages", (c) => {
+function visibleMessages() {
   const inbox = inboxHistory.read()
     .map((m) => sanitizeMessageForClient({ ...m, role: m.source === "email" ? "email" : "user" }));
   const outbox = outboxHistory.read().map((m) => {
@@ -1877,8 +1923,9 @@ app.get("/api/messages", (c) => {
     return sanitizeMessageForClient({ ...m, role: "assistant" });
   });
   const all = [...inbox, ...outbox].sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
-  return c.json(all);
-});
+  return all;
+}
+app.get("/api/messages", (c) => c.json(visibleMessages()));
 
 app.post("/api/push/subscribe", async (c) => {
   const sub = await c.req.json().catch(() => null);
@@ -3218,6 +3265,43 @@ app.get("/api/terminal/history", async (c) => {
   } catch {
     return c.json({ error: "terminal history unavailable" }, 503);
   }
+});
+
+// Kept messages: the person's own list of copies. Routes sit apart from the chat history routes.
+const keptStore = new KeptStore(join(DATA_DIR, "kept.json"));
+function keptFailure(c: any, error: unknown) {
+  const code = error instanceof KeptError ? error.code : "storage";
+  const messages = { invalid: S("kept.invalid"), tooLong: S("kept.tooLong"), full: S("kept.full"), storage: S("kept.storage") };
+  return c.json({ error: messages[code], code }, code === "storage" ? 500 : code === "full" ? 409 : 400);
+}
+app.get("/api/kept", (c) => {
+  try { return c.json(keptStore.list()); }
+  catch (error) { return keptFailure(c, error); }
+});
+app.post("/api/kept", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!isSafeMessageId(body?.message_id)) return c.json({ error: S("kept.invalid") }, 400);
+  try {
+    const message = visibleMessages().find(m => String(m.id) === String(body.message_id));
+    if (!message) return c.json({ error: S("kept.notFound") }, 404);
+    const audio = keptAudioUrl(message.audio_url) && existsSync(join(IMAGES_DIR, message.audio_url.split("/").pop()!)) ? message.audio_url : undefined;
+    return c.json(keptStore.keep({
+      text: message.text ?? "", speaker: message.role === "assistant" ? "agent" : "person",
+      said_at: message.ts, added_by: "person", message_id: String(message.id), audio_url: audio,
+    }));
+  } catch (error) { return keptFailure(c, error); }
+});
+app.delete("/api/kept/:id", (c) => {
+  try { return keptStore.remove(c.req.param("id")) ? c.json({ ok: true }) : c.json({ error: S("kept.notFound") }, 404); }
+  catch (error) { return keptFailure(c, error); }
+});
+app.post("/api/internal/keep", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  try {
+    keptStore.keep({ text: body?.text, said_at: body?.said_at, speaker: body?.speaker, added_by: "agent" });
+    // No copy or list is returned to the agent, or sent to the inbox, websocket or logs.
+    return c.json({ ok: true });
+  } catch (error) { return keptFailure(c, error); }
 });
 
 app.get("/strings.js", (c) => {

@@ -12,7 +12,7 @@ test("the select action shows a pilcrow, keeps its translated label as title and
   };
   const section = source.slice(source.indexOf("  function showEmojiPicker("), source.indexOf("  window.sendReaction"));
   const end = section.indexOf("\n  }", section.indexOf("function showEmojiPicker")) + 4;
-  const picker = new Function("document", "window", "EMOJIS", "t", "setTimeout", `${section.slice(0, end)}; return showEmojiPicker;`)(document, { enableSelect: (id: string) => { selected = id; } }, [], (key: string) => `translated:${key}`, () => {});
+  const picker = new Function("document", "window", "EMOJIS", "t", "setTimeout", "keptEntries", "toggleKept", `${section.slice(0, end)}; return showEmojiPicker;`)(document, { enableSelect: (id: string) => { selected = id; } }, [], (key: string) => `translated:${key}`, () => {}, [], () => {});
   picker({ appendChild() {} }, "message-id");
   const button = buttons.find(b => b.title === "translated:chat.picker.select");
   expect(button.textContent).toBe("¶");
