@@ -8,13 +8,21 @@ Confirmed `CORRECTED_BY` / `SUPERSEDED_BY` edges produce an English warning dire
 
 Variety is local and enabled by default (`Claude/scripts/inlet-diversity.ts`): after the confidence gate, the first search pick keeps today's order and each further pick maximises relevance minus 0.5 times its highest word-shingle Jaccard similarity to a selected passage (direct neighbours count as similarity 1). Relevance is the current sort key, including any time boost, min–max normalised to 0–1 over the gated candidates (all equal: 1). After expansion and slot allocation, adjacent chunks in the same file become one excerpt per block, removing the longest exact overlap of at least 20 characters or joining with a blank line. A merged excerpt has the higher score, united sources and all original warnings; its header uses `[Session_1.md#12–13]` and its text budget is 900 characters, while singles stay at 500. Set `INLET_DIVERSITY=0` to restore the original selection and rendering exactly; no extra model call or network request is made.
 
-The worker uses `Claude/scripts/inlet-expand.ts`. Brain benefits automatically when configured to run `Claude/scripts/inlet-worker.ts`: the runtime's environment key is `BRAIN_INLET_WORKER`, and it passes its environment (including `INLET_EXPAND`) to that worker. No Brain changes are required. Brain's built-in retrieval fallback, used when no external worker is configured, is unchanged.
+The worker uses `Claude/scripts/inlet-expand.ts`. Brain benefits automatically when configured to run `Claude/scripts/inlet-worker.ts`: the runtime's environment key is `BRAIN_INLET_WORKER`, and it passes its environment (including `INLET_EXPAND`) to that worker. No Brain changes are required. Brain's built-in retrieval fallback, used when no external worker is configured, is unchanged. The session-scoped repeat suppression (`INLET_CHUNK_REPEAT_TURNS`, default 40) applies in both Brain houses using this worker and Claude Code houses with a valid hook session ID; the worker still retains its up-to-three-hit fallback when no fresh chronicle candidates remain.
 
 Offline regression tests (local fake RAG server, no external services). Prefix each test path with `./`: without it, Bun treats the argument as a name filter rather than an explicit path.
 
 ```sh
 bun test ./Claude/scripts/inlet-expand.test.ts
 ```
+
+## Earlier thoughts from memory
+
+`INLET_THOUGHTS=1` adds a **Thoughts (memory)** block after people and places and before the time window and chronicle. It shows the agent's earlier observations as conclusions from that moment, not as established truth. It is **off by default**; only the exact value `1` enables searches and the block. `INLET_THOUGHTS_MIN` sets the score threshold (default `0.55`); `INLET_THOUGHTS_MAX` sets the number shown (default `1`, bounded to `1–3`). This is useful with a memory containing a few hundred observations; below that, it rarely finds anything above the threshold.
+
+The worker searches up to three eligible classifier queries plus the first 300 message characters, without refreshing memory access counters or applying a recency boost. It excludes observations already in entity or canon blocks, prefers the newest version of similar conclusions, and uses the existing session chunk cache to suppress repeats. Without a counter or cache configuration it still shows the block. Mechanical messages and turns without a classifier result skip this search. Requests run alongside the existing retrieval, with an eight-second deadline; a failure omits only this block. When enabled, one stderr calibration line contains the query count and up to five candidate IDs and scores, never their text.
+
+For Claude Code, put these variables in the house root `.env`. For Brain configured with the same external worker, put them in `Brain/brain.env`; Brain's built-in retrieval path is unchanged.
 
 ## Time channel
 

@@ -1237,6 +1237,15 @@ writes a project entry in the service account's Claude configuration;
 coordinate that write with its owner, or use a separate service account. For a
 ChatGPT head, also complete step 6c; keep the Claude sign-in.
 
+For every head running on Claude Code, the loop defaults
+`CLAUDE_CODE_SILENT_TURN_REMINDER=0` to suppress the “The user hasn't heard
+from you in a while …” reminder during silent work. Set
+`CLAUDE_CODE_SILENT_TURN_REMINDER=1` in `Claude/app/.env` to re-enable it;
+a house value, including an explicitly empty value, is preserved. Brain's
+Claude pipe uses the same default (configure it in `Brain/brain.env` or the
+inherited environment); heads not running `claude` are unaffected. The effect
+of `0` has been observed in our house, not documented for every Claude Code version.
+
 **Check:** After First start, while the agent is idle:
 
 ```bash
@@ -1249,6 +1258,44 @@ a live prompt, then send a new app message and require an app reply. The
 restart ends the old server through systemd's default `KillMode=control-group`
 and starts a new session. A server outside the unit's cgroup is refused, not
 adopted or killed; finish and stop a hand-started loop before unit start.
+
+### Kimi on Claude Code
+
+Set these values in the house `.env` (or `Claude/app/.env`; the app file
+wins for duplicate loop settings), then restart the loop while idle:
+
+```dotenv
+EMBERVY_BACKEND=kimi
+KIMI_CODE_KEY=your-kimi-coding-key
+# Default model; other model names default to a 262144-token window.
+EMBERVY_KIMI_MODEL=kimi-for-coding
+# Optional window override; without it kimi-for-coding uses 1048576 tokens.
+# EMBERVY_KIMI_CONTEXT=1048576
+# Optional fixed thresholds, retained instead of the scaled defaults:
+# WATCHDOG_WARN_TOKENS_KIMI=180000
+# WATCHDOG_CUT_TOKENS_KIMI=210000
+```
+
+`EMBERVY_KIMI_CONTEXT` accepts a decimal integer from **1024 to 10000000**,
+without leading zeroes, signs, whitespace or expressions. An unset value uses
+the model default; any invalid value (including an explicitly empty value)
+falls back to that default and writes one diagnostic line to `logs/claude-loop.log`.
+The engine log line records the selected model and effective token window.
+This is a configured capacity, not provider discovery: set it only to a
+window the selected model actually supports. Brain uses `BRAIN_KIMI_CONTEXT`
+instead; this setting is for the Claude Code loop only.
+
+The loop sets both `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` to that window. Default warn/cut thresholds
+are `floor(window * 180000 / 262144)` and `floor(window * 210000 / 262144)`:
+720000/840000 for `kimi-for-coding`, 180000/210000 for other models at their
+default window. Explicit `WATCHDOG_WARN_TOKENS_KIMI` and
+`WATCHDOG_CUT_TOKENS_KIMI` values still win independently; generic watchdog
+settings do not replace these defaults. Keep explicit thresholds below the
+CLI blocking limit (95% of the configured Kimi window, rounded down).
+Automatic compaction remains off unless `EMBERVY_AUTO_COMPACT=on` is set.
+The separate watchdog receives the effective window and thresholds through
+the existing `state/watchdog_engine_thresholds` file; do not edit that file.
 
 ### Cut and watchdog
 
@@ -1268,7 +1315,8 @@ Set `EMBERVY_BRIDGE_MODE` (default `turns`) to `sessions` in the house `.env` or
 |---|---:|---:|
 | Claude / GLM | 800000 | 900000 |
 | GPT | 200000 | 220000 |
-| Kimi | 180000 | 210000 |
+| Kimi (`kimi-for-coding`, 1048576-token window) | 720000 | 840000 |
+| Kimi (other models, 262144-token window) | 180000 | 210000 |
 | MiniMax | 150000 | 180000 |
 
 GLM, GPT, Kimi and MiniMax on Claude Code also need the Claude sign-in for the app channel.
@@ -1361,10 +1409,54 @@ cat > "$EMBERVY_HOME/state/claude-settings.json" <<'EOF'
 }
 EOF
 chmod 600 "$EMBERVY_HOME/state/claude-settings.json"
+# Add the quota observer only when the house has no statusline of its own.
+python3 "$EMBERVY_HOME/Claude/scripts/setup-statusline.py" --apply --home "$EMBERVY_HOME"
 ```
 
-The loop unit and foreground start pass this as `--settings` and exclude
-user settings, following "Building a second house on the same server".
+The statusline setup is also the update/installer integration point: run it as
+the house's runtime user **after installing/reloading the loop unit** and merging
+its settings, before starting the loop. First run the same command with `--check`.
+The helper reports its inspection order: the effective loop unit (including
+drop-ins and environment files), `loop-wrapper.sh` / `start-claude-loop.sh` and
+their argument variables/files, then any running house Claude Code command lines
+from `/proc`. It never executes the inspected shell code.
+
+There are two supported outcomes, not one assumed filename:
+- **With `--settings X`:** merge into the actual file X (relative paths are
+  relative to the house working directory). In the unit above this is
+  `state/claude-settings.json`.
+- **Without `--settings`:** Claude Code reads the house's
+  `$EMBERVY_HOME/.claude/settings.json`; merge there instead. Older houses need
+  not add a startup flag or create an unused `state/claude-settings.json`.
+
+An unresolved/dynamic launch, unavailable unit, disabled project settings without
+an explicit file, or disagreement with a running Claude refuses setup **without
+writing**. `--unit NAME.service` and `--systemd-scope user|system` select the unit
+when needed (defaults: `EMBERVY_LOOP_SERVICE` / `EMBERVY_SYSTEMD_SCOPE`, otherwise
+`embervy-loop.service` / `system`); the `.service` suffix may be omitted in
+`--unit` or `EMBERVY_LOOP_SERVICE`. `--settings PATH` is only an assertion against
+the discovered file, not a bypass. For extra settings sources repeat
+`--respect-settings PATH`; do not add a competing command-line statusline.
+
+The helper backs up existing settings before an atomic replacement, validates
+JSON before and after, refuses symlinks (including parent directories), and
+preserves any `statusLine` in the selected file, `state/claude-settings.json`,
+the house's project/local settings or the runtime user's Claude settings.
+`--check` is read-only (0 = configured/preserved, 1 = setup needed, 2 =
+refused/error); repeating `--apply` does not change an already configured house.
+The change takes effect on the **next start of Claude Code**, not in a running
+session. After its first turn, check that `state/claude-statusline.json` exists.
+The Bash/Python observer saves only observation time, unchanged `rate_limits`
+and model in `state/claude-statusline.json` (0600, atomic rename). The numbers
+are only as fresh as the last statusline update, not a live subscription probe.
+The cache ping reads this file, and signed-in app sessions can read
+`GET /api/claude-limits`; Brain continues to use its own `/limits`. See
+[`docs/cache-ping.md`](docs/cache-ping.md#statusline-observations) for details.
+
+The loop unit and foreground start **shown in this guide** pass this as
+`--settings` and exclude user settings, following "Building a second house on
+the same server". Existing houses may instead start without `--settings`; use
+the inspection above rather than assuming they follow this example.
 `cleanupPeriodDays` keeps Claude Code's own session files under
 `~/.claude/projects` for ten years; without it Claude Code deletes them
 after 30 days, and the house keeps them as its raw record. Cleanup covers

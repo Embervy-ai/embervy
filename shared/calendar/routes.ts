@@ -2,7 +2,7 @@
 // The host authenticates API routes; subscription feeds use their own token.
 
 import { join } from "node:path";
-import { calendarFile, EXTERNAL_CACHE_NAME, readEntries, upcomingEntries, validateNewEntry, writeEntries } from "./store";
+import { calendarFile, EXTERNAL_CACHE_NAME, readEntries, upcomingEntries, validateNewEntries, writeEntries } from "./store";
 import { renderFeed } from "./ics";
 import {
   DEFAULT_DAYS_AHEAD,
@@ -14,7 +14,7 @@ import {
   readExternalCache,
   syncExternal,
 } from "./external";
-import { addDays, envWord, houseTimeZone, localDate } from "./time";
+import { addDays, envWord, houseTimeZone, localDate, parseDate } from "./time";
 import { envValue } from "../scripts/legacy-names";
 import { appAddress } from "../scripts/app-address";
 
@@ -112,22 +112,32 @@ export function createCalendarHandlers(cfg: CalendarConfig, clock: () => number 
 
     async add(req: Request): Promise<Response> {
       const body = await req.json().catch(() => null);
-      const { entry, error } = validateNewEntry(body, new Date(clock()));
-      if (!entry) return json({ error }, 400);
-      const entries = readEntries(file);
-      entries.push(entry);
-      writeEntries(file, entries);
-      return json({ ok: true, entry });
+      const { entries, error } = validateNewEntries(body, new Date(clock()));
+      if (!entries) return json({ error }, 400);
+      writeEntries(file, [...readEntries(file), ...entries]);
+      return entries[0].series
+        ? json({ ok: true, series: entries[0].series, entries })
+        : json({ ok: true, entry: entries[0] });
     },
 
     async remove(req: Request): Promise<Response> {
       const body: any = await req.json().catch(() => null);
       const id = typeof body?.id === "string" ? body.id : "";
-      if (!id) return json({ error: "id required" }, 400);
+      const series = typeof body?.series === "string" ? body.series : "";
+      if ((!id && !series) || (id && series)) return json({ error: "provide either id or series" }, 400);
+      const from = body?.from;
+      if (from !== undefined && (!series || typeof from !== "string" || !parseDate(from))) {
+        return json({ error: "from needs series and a valid YYYY-MM-DD date" }, 400);
+      }
       const entries = readEntries(file);
-      const kept = entries.filter((e) => e.id !== id);
-      if (kept.length === entries.length) return json({ ok: false, error: "no entry with that id in your calendar" }, 404);
-      writeEntries(file, kept);
+      if (series && !entries.some((e) => e.series === series)) {
+        return json({ ok: false, error: "no series with that id in your calendar" }, 404);
+      }
+      const kept = entries.filter((e) => series
+        ? e.series !== series || (from !== undefined && e.date < from)
+        : e.id !== id);
+      if (!series && kept.length === entries.length) return json({ ok: false, error: "no entry with that id in your calendar" }, 404);
+      if (kept.length !== entries.length) writeEntries(file, kept);
       return json({ ok: true, removed: entries.length - kept.length });
     },
 

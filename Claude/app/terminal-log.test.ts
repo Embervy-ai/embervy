@@ -524,6 +524,8 @@ test("client drops stale pages and gaps after reopening or changing views", asyn
 
 test("client keeps tool expansion by key when equal summaries and changed results swap", () => {
   const h = logClient();
+  // A filled view: this test is about expansion state, not about loading older output.
+  h.scroll.clientHeight = 10;
   const tools = ["one", "two"].map(key => ({ key, summary_html: "same summary", body_html: "pending", error: false }));
   h.openTerminal();
   h.renderTerminalFrame(clientFrame(tools));

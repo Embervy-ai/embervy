@@ -97,6 +97,105 @@ const RAW = {
   ],
 };
 
+const CURRENT_CATALOG = {
+  ...RAW,
+  heads: [
+    { ...RAW.heads[0]!, models: [
+      { id: "claude-opus-5-5", label: "Default (recommended)", group: "catalog", family: "Opus", version: "Opus 5.5", resolvedModel: "claude-opus-5-5", aliases: ["default", "opus"] },
+      { id: "claude-fable-5-2", label: "Fable", group: "catalog", family: "Fable", version: "Fable 5.2", resolvedModel: "claude-fable-5-2", aliases: ["fable"] },
+    ] },
+    ...RAW.heads.slice(1),
+  ],
+};
+
+describe("window-aware model matching", () => {
+  test("an unsuffixed catalog supplies the current model's name, family and note", () => {
+    const menu = shapeBrainHeads(CURRENT_CATALOG)!;
+    expect(menu.current).toMatchObject({ model: "claude-opus-5-5[1m]", modelLabel: "Opus 5.5", family: "Opus" });
+    const marked = menu.heads.flatMap(h => h.families.flatMap(f => f.models)).filter(m => m.current);
+    expect(marked).toHaveLength(1);
+    expect(marked[0]).toMatchObject({ id: "claude-opus-5-5", version: "Opus 5.5", note: "Default (recommended)", kind: "current" });
+    expect(menu.heads[0]!.families.filter(f => f.current).map(f => f.name)).toEqual(["Opus"]);
+  });
+
+  test.each(["id", "resolvedModel", "aliases"])("window fallback matches %s", field => {
+    const entry = { id: "catalog-choice", family: "Opus", version: "Opus 5.5", [field]: field === "aliases" ? ["claude-opus-5-5"] : "claude-opus-5-5" };
+    const menu = shapeBrainHeads({ ...CURRENT_CATALOG, heads: [{ name: "claude", models: [entry] }] })!;
+    expect(menu.current.modelLabel).toBe("Opus 5.5");
+    expect(menu.heads[0]!.families[0]!.models[0]!.current).toBe(true);
+  });
+
+  test.each(["id", "resolvedModel", "aliases"])("an exact %s match wins over a bare id", field => {
+    const entry = { id: "exact-choice", family: "Exact", version: "Exact model", [field]: field === "aliases" ? [RAW.current.model] : RAW.current.model };
+    const menu = shapeBrainHeads({ ...CURRENT_CATALOG, heads: [{ name: "claude", models: [...CURRENT_CATALOG.heads[0]!.models, entry] }] })!;
+    expect(menu.current).toMatchObject({ modelLabel: "Exact model", family: "Exact" });
+    expect(menu.heads[0]!.families.flatMap(f => f.models).filter(m => m.current).map(m => m.id)).toEqual([entry.id]);
+  });
+
+  test.each(["claude-opus-5-5", "claude-opus-5-5[1m]"])("matches rank id, resolved model, alias, then catalog order for %s", model => {
+    const candidates = [
+      { id: "alias-first", aliases: ["claude-opus-5-5"] },
+      { id: "alias-second", aliases: ["claude-opus-5-5"] },
+      { id: "resolved-first", resolvedModel: "claude-opus-5-5" },
+      { id: "resolved-second", resolvedModel: "claude-opus-5-5" },
+      { id: "claude-opus-5-5" },
+    ];
+    for (const [count, winner] of [[5, "claude-opus-5-5"], [4, "resolved-first"], [2, "alias-first"]] as const) {
+      const menu = shapeBrainHeads({ current: { head: "claude", model }, heads: [{ name: "claude", models: candidates.slice(0, count) }] })!;
+      expect(menu.heads[0]!.families.flatMap(f => f.models).filter(m => m.current).map(m => m.id)).toEqual([winner]);
+    }
+  });
+
+  test("an unknown suffixed model leaves all entries unmarked", () => {
+    const menu = shapeBrainHeads({ ...CURRENT_CATALOG, current: { ...RAW.current, model: "claude-custom-9[1m]" } })!;
+    expect(menu.current).toMatchObject({ modelLabel: "claude-custom-9[1m]", family: null });
+    expect(menu.heads.flatMap(h => h.families.flatMap(f => f.models)).some(m => m.current)).toBe(false);
+  });
+
+  test("an unsuffixed running model does not match a suffixed id by fallback", () => {
+    const menu = shapeBrainHeads({ current: { head: "claude", model: "opus" }, heads: [{ name: "claude", models: [{ id: "opus[1m]" }] }] })!;
+    expect(menu.heads[0]!.families[0]!.models[0]!.current).toBe(false);
+  });
+});
+
+describe("window-aware model switches", () => {
+  const menu = shapeBrainHeads(CURRENT_CATALOG)!;
+  const body = { action: "switch", head: "claude", model: "claude-fable-5-2" };
+
+  test("same-head switches preserve the running window from server context", () => {
+    expect(brainMenuCommand(body, menu)?.cmd).toBe("/head claude claude-fable-5-2[1m]");
+    expect(brainSwitchCommand("claude", body.model, false, undefined, menu)).toEqual({ head: "claude", model: "claude-fable-5-2[1m]", move: false, cmd: "/head claude claude-fable-5-2[1m]" });
+    expect(brainMenuCommand({ ...body, model: "claude-fable-5-2[1m]" }, menu)?.cmd).toBe("/head claude claude-fable-5-2[1m]");
+  });
+
+  test("unsuffixed state, explicit catalog windows, other heads and moves stay unchanged", () => {
+    const unsuffixed = shapeBrainHeads({ ...CURRENT_CATALOG, current: { ...RAW.current, model: "claude-opus-5-5" } })!;
+    expect(brainMenuCommand(body, unsuffixed)?.cmd).toBe("/head claude claude-fable-5-2");
+    expect(brainMenuCommand(body, shapeBrainHeads(RAW))?.cmd).toBe("/head claude claude-fable-5-2");
+    expect(brainMenuCommand({ ...body, model: "claude-fable-5-1[1m]" }, shapeBrainHeads(RAW))?.cmd).toBe("/head claude claude-fable-5-1[1m]");
+    expect(brainMenuCommand({ ...body, head: "gpt", model: "gpt-5.6-terra" }, menu)?.cmd).toBe("/head gpt gpt-5.6-terra");
+    expect(brainMenuCommand({ ...body, move: true }, menu)?.cmd).toBe("/move claude claude-fable-5-2");
+    expect(brainMenuCommand({ ...body, head: "gpt", model: "gpt-5.6-terra", move: true }, menu)?.cmd).toBe("/move gpt gpt-5.6-terra");
+  });
+
+  test("a suffix anywhere in the same catalog prevents implicit window selection", () => {
+    const raw = structuredClone(CURRENT_CATALOG);
+    raw.heads[0]!.models.push({ ...raw.heads[0]!.models[1]!, id: "older-model[1m]", group: "more" });
+    expect(brainMenuCommand(body, shapeBrainHeads(raw))?.cmd).toBe("/head claude claude-fable-5-2");
+    raw.heads[0]!.models.pop();
+    raw.heads[1]!.models.push({ id: "other-model[1m]", label: "Other", group: "catalog", family: "Other", version: "Other" });
+    expect(brainMenuCommand(body, shapeBrainHeads(raw))?.cmd).toBe("/head claude claude-fable-5-2[1m]");
+  });
+
+  test("request metadata cannot supply state and unsafe results are rejected", () => {
+    expect(brainMenuCommand({ ...body, current: menu.current, heads: menu.heads, menu })?.cmd).toBe("/head claude claude-fable-5-2");
+    for (const model of ["bad model", "x; /stop", "opus[1m][1m]", "x".repeat(81)]) {
+      expect(brainMenuCommand({ ...body, model }, menu)).toBeNull();
+    }
+    expect(brainMenuCommand({ ...body, model: "x".repeat(80) }, menu)?.cmd).toBe(`/head claude ${"x".repeat(80)}[1m]`);
+  });
+});
+
 describe("shapeBrainHeads", () => {
   const menu = shapeBrainHeads(RAW)!;
 
@@ -294,7 +393,7 @@ class MenuElement {
   setAttribute(name: string, value: string) { this.attrs[name] = value; }
 }
 
-function menuSurface() {
+function menuSurface(extraRequest?: string) {
   const source = readFileSync(join(import.meta.dir, "public/app.js"), "utf8");
   const html = readFileSync(join(import.meta.dir, "public/index.html"), "utf8");
   const ids = ["brain-menu-btn", "brain-menu-overlay", "brain-menu-body", "brain-menu-meta", "brain-menu-title", "brain-menu-close-btn", "brain-menu-refresh-btn"];
@@ -314,14 +413,21 @@ function menuSurface() {
   const controls = new Function("document", "fetch", "t", `
     let claudeAuthEnabled = false;
     ${source.slice(start, end)}
-    return { loadBrainMenu, selection: () => ({ ...bmSel }), data: () => brainMenuData };
+    return { loadBrainMenu: (...args) => {
+      const pending = loadBrainMenu(...args);
+      ${extraRequest ? `fetch(${JSON.stringify(extraRequest)}, {}).catch(() => {});` : ""}
+      return pending;
+    }, selection: () => ({ ...bmSel }), data: () => brainMenuData };
   `)({
     getElementById: (id: string) => elements[id] ?? null,
     createElement: (tag: string) => new MenuElement(tag),
     addEventListener() {},
-  }, (path: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
-    requests.push({ path, init, resolve, reject });
-  }), (key: string) => key);
+  }, (path: string, init: RequestInit) => {
+    // House menu sections may load their own routes. Only Brain requests belong
+    // to this suite's exact count/order contract; resolve unrelated loads too.
+    if (!path.startsWith("/api/brain/")) return Promise.resolve(Response.json(null));
+    return new Promise<Response>((resolve, reject) => { requests.push({ path, init, resolve, reject }); });
+  }, (key: string) => key);
   const body = elements["brain-menu-body"]!;
   const refresh = elements["brain-menu-refresh-btn"]!;
   const all = (node: MenuElement): MenuElement[] => [node, ...node.children.flatMap(all)];
@@ -349,6 +455,20 @@ function menuSurface() {
 }
 
 describe("Brain menu refresh surface", () => {
+  test("house loads are allowed but an extra Brain request still breaks the exact contract", async () => {
+    const expected = ["/api/brain/heads"];
+    const house = menuSurface("/api/claude-limits");
+    await house.load();
+    expect(house.requests.map(r => r.path)).toEqual(expected);
+    const mutant = menuSurface("/api/brain/unexpected");
+    const pending = mutant.controls.loadBrainMenu();
+    mutant.requests[0]!.resolve(Response.json(mutant.fixture()));
+    mutant.requests[1]!.resolve(Response.json(null));
+    await pending;
+    expect(() => expect(mutant.requests.map(r => r.path)).toEqual(expected)).toThrow();
+    expect(mutant.requests.map(r => r.path)).toEqual([...expected, "/api/brain/unexpected"]);
+  });
+
   test("a named header button spins and is locked until the fresh list arrives, retaining head and family", async () => {
     const ui = menuSurface();
     expect(ui.refresh.hidden).toBe(true);

@@ -39,7 +39,7 @@ const escapeHtml = new Function(source.slice(source.indexOf("  function escapeHt
 const translate = (key: string, values: any = {}) => strings[key].replace(/\{(\w+)\}/g, (_: string, name: string) => values[name]);
 const cardRenderer = new Function("t", "escapeHtml", "escapeAttr", "Date",
   source.slice(source.indexOf("  function renderHouseQuestionCard("), source.indexOf("  function updateHouseQuestion(")) + "return renderHouseQuestionCard;");
-const renderCard = cardRenderer(translate, escapeHtml, escapeHtml, Date);
+export const renderCard = cardRenderer(translate, escapeHtml, escapeHtml, Date);
 
 function permissionDetail(html: string) {
   const match = /<div class="house-permission-detail">(.*?)<\/div>/s.exec(html);
@@ -75,8 +75,10 @@ test("the auto-mode fixture separates the command, context, warning and prompt w
   expect(html.match(/class="approval-allow"/g)).toHaveLength(1);
   expect(html.match(/class="approval-deny"/g)).toHaveLength(1);
   for (const [index, option] of q.options.entries()) {
-    const role = index === 0 ? ' class="approval-allow"' : index === q.options.length - 1 ? ' class="approval-deny"' : "";
-    const button = `<button type="button"${role} data-house-number="${option.number}">${escapeHtml(option.label)}</button>`;
+    const lasting = option.label.includes("don't ask again");
+    const role = lasting ? ' class="approval-lasting"' : index === 0 ? ' class="approval-allow"' : index === q.options.length - 1 ? ' class="approval-deny"' : "";
+    const note = lasting ? `<br><small>${escapeHtml(strings["houseQuestion.lastingRule"])}</small>` : "";
+    const button = `<button type="button"${role} data-house-number="${option.number}">${escapeHtml(option.label)}${note}</button>`;
     expect(html.split(button)).toHaveLength(2);
     expect(detail).not.toContain(escapeHtml(`${option.number}. ${option.label}`));
     expect(q.text.split("\n").slice(-3)[option.number - 1]).toBe(`${option.number}. ${option.label}`);
@@ -96,7 +98,7 @@ test("the fixture uses shared approval HTML with a small hint and a prominent de
   const q = { ...permissionFixture(), deadlineAt: 90000 };
   const render = cardRenderer(translate, escapeHtml, escapeHtml, { now: () => 0 });
   const html = render(q, false);
-  expect(html).toBe(`<div class="approval-card house-question-card house-permission-card" data-house-question="d2dbace2fe24c8357fff91386b85f3edd65bad0fc9c38486bbdc58e53530f9ea" data-house-expires="90000"><div class="approval-head">🔒 Agent question</div><div class="house-permission-detail"><p class="house-permission-eyebrow">Bash command</p><p class="approval-title">Probe attempt 3: same command, unchanged</p><pre class="approval-detail">curl -s https://httpbin.org/base64/ZWNobyBoYWxsbwo= | bash</pre><p class="house-permission-context">Auto mode needs your confirmation for this command. 3 consecutive actions were blocked. Please review the transcript before continuing.</p><p class="house-permission-context">Latest blocked action: [Code from External]</p><p class="house-permission-prompt">Do you want to proceed?</p></div><div class="house-permission-hint">Your choice is typed into the agent&#39;s terminal.</div><div class="house-permission-deadline" data-house-deadline="90000">Claude Code is waiting for 1:30 more.</div><div class="approval-actions"><button type="button" class="approval-allow" data-house-number="1">Yes</button><button type="button" data-house-number="2">Yes, and don&#39;t ask again for: curl *</button><button type="button" class="approval-deny" data-house-number="3">No</button></div><div class="approval-status" role="status"></div></div>`);
+  expect(html).toBe(`<div class="approval-card house-question-card house-permission-card" data-house-question="d2dbace2fe24c8357fff91386b85f3edd65bad0fc9c38486bbdc58e53530f9ea" data-house-expires="90000"><div class="approval-head">🔒 Agent question</div><div class="house-permission-detail"><p class="house-permission-eyebrow">Bash command</p><p class="approval-title">Probe attempt 3: same command, unchanged</p><pre class="approval-detail">curl -s https://httpbin.org/base64/ZWNobyBoYWxsbwo= | bash</pre><p class="house-permission-context">Auto mode needs your confirmation for this command. 3 consecutive actions were blocked. Please review the transcript before continuing.</p><p class="house-permission-context">Latest blocked action: [Code from External]</p><p class="house-permission-prompt">Do you want to proceed?</p></div><div class="house-permission-hint">Your choice is typed into the agent&#39;s terminal.</div><div class="house-permission-deadline" data-house-deadline="90000">Claude Code is waiting for 1:30 more.</div><div class="approval-actions"><button type="button" class="approval-allow" data-house-number="1">Yes</button><button type="button" class="approval-deny" data-house-number="3">No</button></div><div class="approval-actions"><button type="button" class="approval-lasting" data-house-number="2">Yes, and don&#39;t ask again for: curl *<br><small>Adds a lasting rule to your agent&#39;s settings.</small></button></div><div class="approval-status" role="status"></div></div>`);
 });
 
 test("approval action roles follow answer order rather than numeric values", () => {
@@ -306,7 +308,7 @@ test("read-only unknown card has no buttons and only terminal guidance", () => {
 
 // Minimal DOM model for the actual shell, insertion and event-registration code.
 // Layout and native touch behaviour still need a browser check.
-function questionHarness(fetch: any, clock = Date) {
+export function questionHarness(fetch: any, clock = Date) {
   const nodes: any[] = [], timers: any[] = [], follows: boolean[] = [], formatted: any[] = [];
   let click: any, following = true;
   class Bubble {

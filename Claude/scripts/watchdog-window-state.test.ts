@@ -79,7 +79,7 @@ write_state
   });
 }
 
-for (const secondLine of ["gpt own 262144", "claude generic 1000000", "kimi own", "claude generic 0", "gpt own -1", "gpt own 2e5", "gpt own 262144x"]) {
+for (const secondLine of ["gpt own 262144", "claude generic 1000000", "kimi own", "kimi own 1048576", "kimi own 262144", "claude generic 0", "gpt own -1", "gpt own 2e5", "gpt own 262144x"]) {
   test(`Claude Code state: engine metadata '${secondLine}' does not change thresholds or percent`, () => {
     isolated((root, shell) => {
       writeFileSync(join(root, "state/watchdog_engine_thresholds"), `209715 235929\n${secondLine}\n`);
@@ -134,7 +134,8 @@ write_state
 
 const engines = [
   { engine: "gpt", kind: "own", env: { GPT_WINDOW: "262144" }, window: "262144" },
-  { engine: "kimi", kind: "own", env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "262144", CLAUDE_CODE_MAX_CONTEXT_TOKENS: "256000" }, window: "262144" },
+  { engine: "kimi", kind: "own", env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1048576", CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1048576" }, window: "1048576" },
+  { engine: "kimi", kind: "own", env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "262144", CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144" }, window: "262144" },
   { engine: "minimax", kind: "own", env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: "200000" }, window: "200000" },
   { engine: "claude", kind: "generic", env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000" }, window: "1000000" },
   { engine: "claude", kind: "generic", env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "262144" }, window: "" },

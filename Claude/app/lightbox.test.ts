@@ -81,7 +81,9 @@ function harness(nodes = [image("/a.jpg"), image("/b.jpg"), image("/c.jpg")]) {
     function openTerminal() { terminalOpen = true; opened++; }
     function closeTerminal() { terminalOpen = false; closed++; }
     ${section("  function lightboxImages(", "  // A file in the chat")}
-    ${section("  let terminalTouchX =", "  setInterval(() => {\n    if (terminalOpen && terminalFreshness")}
+    // The page gesture consults the sideways-scroll check; nothing in this harness scrolls sideways.
+    const Element = function () {}, getComputedStyle = () => ({ overflowX: "visible" });
+    ${section("  function startsInSidewaysScroller(", "  setInterval(() => {\n    if (terminalOpen && terminalFreshness")}
     return { openLightbox, lightboxImages, state: () => ({ terminalOpen, opened, closed, terminalTouchX, terminalTouchY }) };
   `)(document, { querySelectorAll: (selector: string) => {
     expect(selector).toBe("img.chat-image, a.file-chip, a.file-link");

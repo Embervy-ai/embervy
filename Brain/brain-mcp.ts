@@ -3,6 +3,13 @@
 import { STATUS_TOOL_ACCOUNT_WORD } from "./account";
 import { tr } from "./texts";
 import { webToolDefs } from "./web-tools";
+import { appendFileSync } from "node:fs";
+import { APPROVAL_LIFETIME_MS, approvalFailure, type ApprovalOutcome } from "./app-channel";
+
+// Application deadlines remain authoritative for HTTP calls that may wait for a person.
+export function deadlineFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): ReturnType<typeof fetch> {
+  return fetch(input, { ...init, timeout: false });
+}
 
 const CONTROL_URL = `http://127.0.0.1:${process.env.BRAIN_CONTROL_PORT ?? "3910"}/tool`;
 const CONTROL_TOKEN = process.env.BRAIN_CONTROL_TOKEN;
@@ -23,10 +30,14 @@ export function toolsFor(env: Record<string, string | undefined> = process.env):
 }
 
 // Approval waits for a person; web rendering may need to start a browser first.
-export function callTimeoutMs(name: string): number {
-  if (name === "approve") return 1_800_000;
-  if (name === "web_fetch") return 150_000;
-  if (name === "web_search") return 60_000;
+export function callTimeoutMs(name: string, env: Record<string, string | undefined> = process.env): number {
+  const ms = (key: string, fallback: number) => {
+    const value = Number(env[key]);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  };
+  if (name === "approve") return APPROVAL_LIFETIME_MS;
+  if (name === "web_fetch") return Math.max(150_000, ms("BRAIN_WEB_FETCH_TIMEOUT_MS", 20_000) + 2 * ms("BRAIN_WEB_BROWSER_TIMEOUT_MS", 100_000) + 10_000);
+  if (name === "web_search") return Math.max(60_000, ms("BRAIN_WEB_SEARCH_TIMEOUT_MS", 20_000) + 10_000);
   return 30_000;
 }
 
@@ -37,7 +48,23 @@ function replyError(id: unknown, code: number, message: string): void {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\n");
 }
 
-export async function callControl(name: string, args: unknown, fetchImpl: typeof fetch = fetch): Promise<{ text: string; isError: boolean }> {
+export async function callControl(name: string, args: unknown, fetchImpl: typeof fetch = fetch, opts: {
+  signal?: AbortSignal; timeoutMs?: number; log?: (event: Record<string, unknown>) => void;
+} = {}): Promise<{ text: string; isError: boolean }> {
+  const started = Date.now();
+  // The approval handler owns the card deadline, including any deadline returned by the app.
+  const deadline = name === "approve" && opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs ?? callTimeoutMs(name));
+  const signal = opts.signal && deadline ? AbortSignal.any([opts.signal, deadline]) : opts.signal ?? deadline;
+  const deny = (outcome: ApprovalOutcome, error?: unknown) => {
+    const event = { type: "approval_transport_end", decision: "deny", outcome, wait_ms: Date.now() - started };
+    if (opts.log) opts.log(event);
+    else if (process.env.BRAIN_APPROVAL_LOG) {
+      try { appendFileSync(process.env.BRAIN_APPROVAL_LOG, JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n"); }
+      catch { /* Logging must not prevent a fail-closed response. */ }
+    }
+    return { text: JSON.stringify({ behavior: "deny", message: approvalFailure(outcome) + (outcome === "unreachable" && error ? `: ${error}` : "") }), isError: false };
+  };
+  let reached = false;
   try {
     const res = await fetchImpl(CONTROL_URL, {
       method: "POST",
@@ -46,15 +73,26 @@ export async function callControl(name: string, args: unknown, fetchImpl: typeof
         ...(CONTROL_TOKEN ? { authorization: `Bearer ${CONTROL_TOKEN}` } : {}),
       },
       body: JSON.stringify({ name, args }),
-      signal: AbortSignal.timeout(callTimeoutMs(name)),
+      signal, timeout: false,
     });
+    reached = true;
     const body: any = await res.json().catch(() => null);
+    if (name === "approve") {
+      let answer: any;
+      try { answer = JSON.parse(body?.text); } catch { /* Invalid responses deny permission. */ }
+      if (!res.ok || !body?.ok || !["allow", "deny"].includes(answer?.behavior)) return deny("invalid");
+    }
     if (body?.ok && typeof body.text === "string") return { text: body.text, isError: false };
     return { text: `error: ${body?.error ?? `HTTP ${res.status}`}`, isError: true };
   } catch (err: any) {
     if (name === "approve") {
-      // An unreachable approval service must deny permission rather than leave the decision open.
-      return { text: JSON.stringify({ behavior: "deny", message: `approval endpoint unreachable: ${err?.message ?? err}` }), isError: false };
+      const description = `${err?.name} ${err?.code} ${err?.message}`;
+      const refused = /ECONNREFUSED|ConnectionRefused|Unable to connect|ENOTFOUND|EAI_AGAIN/i.test(description);
+      const outcome: ApprovalOutcome = deadline?.aborted ? "expired"
+        : opts.signal?.aborted ? "disconnected"
+        : !reached && refused ? "unreachable"
+        : reached || /timeout|timed out|ECONNRESET|EPIPE|closed|socket/i.test(description) ? "disconnected" : "unreachable";
+      return deny(outcome, err?.message ?? err);
     }
     return { text: tr`error: Brain endpoint unreachable (${err?.message ?? err}) — is Brain running?`, isError: true };
   }

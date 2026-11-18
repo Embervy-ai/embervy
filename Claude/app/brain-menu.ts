@@ -108,7 +108,7 @@ export function shapeBrainHeads(raw: unknown, labels: { otherFamily?: string; no
   const r = raw as Record<string, any>;
   const cur = r.current && typeof r.current === "object" ? r.current : null;
   const curHead = str(cur?.head, 20);
-  const curModel = str(cur?.model, 80);
+  const curModel = str(cur?.model, 90);
   if (!curHead || !curModel || !Array.isArray(r.heads)) return null;
   const otherFamily = labels.otherFamily ?? OTHER_FAMILY;
 
@@ -120,6 +120,9 @@ export function shapeBrainHeads(raw: unknown, labels: { otherFamily?: string; no
     const families: MenuFamily[] = [];
     const seen = new Set<string>();
     const models: Array<MenuModel & { family: string }> = [];
+    let currentIndex = -1;
+    let currentRank = Infinity;
+    const bareModel = curModel.endsWith("[1m]") ? curModel.slice(0, -4) : null;
     for (const m of Array.isArray(h?.models) ? h.models : []) {
       const id = str(m?.id, 90);
       if (!id || !SAFE_MODEL_ID.test(id) || seen.has(id)) continue;
@@ -128,12 +131,23 @@ export function shapeBrainHeads(raw: unknown, labels: { otherFamily?: string; no
       const version = str(m?.version) ?? label;
       const family = str(m?.family, 40) ?? otherFamily;
       const note = label !== version && label.toLowerCase() !== family.toLowerCase() ? label : null;
-      const current = isCurrentHead && (id === curModel || m?.resolvedModel === curModel || idList(m?.aliases).includes(curModel));
-      const kind: SwitchKind = current ? "current" : isCurrentHead ? "model" : "head";
+      const aliases = idList(m?.aliases);
+      const rank = (value: string): number => id === value ? 0 : m?.resolvedModel === value ? 1 : aliases.includes(value) ? 2 : Infinity;
+      // Exact matches outrank window fallback; equal ranks keep catalog order.
+      const matchRank = isCurrentHead ? Math.min(rank(curModel), bareModel === null ? Infinity : 3 + rank(bareModel)) : Infinity;
+      if (matchRank < currentRank) {
+        currentIndex = models.length;
+        currentRank = matchRank;
+      }
+      const kind: SwitchKind = isCurrentHead ? "model" : "head";
       models.push({
-        id, version, note, family, more: m?.group === "more", current, kind,
+        id, version, note, family, more: m?.group === "more", current: false, kind,
         effortLevels: kind === "head" ? targetEffortLevels(name, m) : [],
       });
+    }
+    if (currentIndex >= 0) {
+      models[currentIndex]!.current = true;
+      models[currentIndex]!.kind = "current";
     }
     for (const m of [...models.filter((x) => !x.more), ...models.filter((x) => x.more)]) {
       let fam = families.find((f) => f.name === m.family);
@@ -179,14 +193,21 @@ export function shapeBrainHeads(raw: unknown, labels: { otherFamily?: string; no
 export type BrainSwitch = { head: string; model: string; move: boolean; cmd: string };
 
 // A move chooses effort for the target head; a live model change keeps the running level.
-export function brainSwitchCommand(head: unknown, model: unknown, move: unknown = false, effort: unknown = undefined): BrainSwitch | null {
+export function brainSwitchCommand(head: unknown, model: unknown, move: unknown = false, effort: unknown = undefined, heads: BrainMenu | null = null): BrainSwitch | null {
   if (typeof head !== "string" || typeof model !== "string") return null;
   const h = head.trim().toLowerCase();
-  const m = model.trim();
+  let m = model.trim();
   if (!SAFE_HEAD_NAME.test(h) || !SAFE_MODEL_ID.test(m)) return null;
   const fullMove = move === true;
   const e = typeof effort === "string" ? effort.trim() : effort == null ? "" : null;
   if (e === null || (e && (!fullMove || !EFFORT_NAME.test(e)))) return null;
+  const catalog = heads?.heads.find((entry) => entry.name === h);
+  // Only server-fetched state may preserve the running window; explicit catalog windows stay authoritative.
+  if (!fullMove && heads?.current.head === h && heads.current.model.endsWith("[1m]") && catalog &&
+      !catalog.families.some((family) => family.models.some((entry) => entry.id.endsWith("[1m]"))) && !m.endsWith("[1m]")) {
+    m += "[1m]";
+  }
+  if (!SAFE_MODEL_ID.test(m)) return null;
   return { head: h, model: m, move: fullMove, cmd: fullMove ? `/move ${h} ${m}${e ? ` effort=${e}` : ""}` : `/head ${h} ${m}` };
 }
 
@@ -200,11 +221,11 @@ export const BRAIN_RESTART_COMMAND = "/respawn";
 
 export type BrainMenuCommand = { action: "switch" | "effort" | "restart"; cmd: string; move?: boolean };
 
-export function brainMenuCommand(body: unknown): BrainMenuCommand | null {
+export function brainMenuCommand(body: unknown, heads: BrainMenu | null = null): BrainMenuCommand | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   if (b.action === "switch") {
-    const sw = brainSwitchCommand(b.head, b.model, b.move, b.effort);
+    const sw = brainSwitchCommand(b.head, b.model, b.move, b.effort, heads);
     return sw ? { action: "switch", cmd: sw.cmd, move: sw.move } : null;
   }
   if (b.action === "effort") {

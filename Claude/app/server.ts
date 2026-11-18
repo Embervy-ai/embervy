@@ -34,6 +34,7 @@ import { brokenBroadcastField, cleanReplyTo, isSafeMessageId, replyQuoteFromId }
 import { fileViewer, rawFileHeaders, RAW_TEXT_TYPES, VIEWER_JS, VIEWER_SCRIPT_PATH } from "./file-viewer";
 import { calendarConfigFromEnv, isCalendarFeedPath, registerCalendarRoutes, startExternalPoller } from "../../shared/calendar/routes";
 import { brainControlFrom, brainDirFor, brainHeadsError, brainMenuCommand, envValues, shapeBrainHeads } from "./brain-menu";
+import { readClaudeLimits } from "./claude-limits";
 import { parseRoomState, pollRoom, roomConfigsFromEnv, roomMessagePrefix, roomStateFileName, sendToRoom } from "./room-door";
 import { peerConfigsFromEnv, registerPeerRoutes } from "./peer-door";
 import { envValue, houseHome, MEMORY_IMAGE_PATH, MEMORY_VIDEO_PATH, SESSION_COOKIE } from "../../shared/scripts/legacy-names";
@@ -3002,6 +3003,18 @@ function brainHeadsErrorText(status: number): string {
   return S("brainMenu.error.status", { status });
 }
 
+// This observation belongs to signed-in menu sessions, not agent/local trust.
+app.get("/api/claude-limits", async (c) => {
+  c.header("Cache-Control", "private, no-store");
+  if (!await isHumanSession(c)) return c.json({ error: "unauthorized" }, 401);
+  if (BRAIN_HARNESS || envValue("EMBERVY_SUBSTRATE") === "brain") return c.json(null);
+  const env = readClaudeCodeEnv();
+  const configured = env.EMBERVY_CACHE_PING_STATUS_FILE;
+  const file = configured ? (configured.startsWith("/") ? configured : join(env.EMBERVY_HOME, configured))
+    : join(env.EMBERVY_HOME, "state/claude-statusline.json");
+  return c.json(readClaudeLimits(file));
+});
+
 app.get("/api/brain/heads", async (c) => {
   if (claudeCodeCutAvailable()) {
     c.header("Cache-Control", "no-store");
@@ -3034,7 +3047,8 @@ app.get("/api/brain/heads", async (c) => {
 app.post("/api/brain/command", async (c) => {
   const canCut = claudeCodeCutAvailable();
   if (!BRAIN_HARNESS && !canCut) return c.json({ error: "not brain" }, 404);
-  const picked = brainMenuCommand(await c.req.json().catch(() => null));
+  const body = await c.req.json().catch(() => null);
+  let picked = brainMenuCommand(body);
   if (!picked) return c.json({ error: S("brainMenu.error.invalid") }, 400);
   if (canCut) {
     if (picked.action !== "restart") return c.json({ error: S("brainMenu.error.invalid") }, 400);
@@ -3045,6 +3059,34 @@ app.post("/api/brain/command", async (c) => {
     } catch (err) {
       process.stderr.write(`embervy-app: cut request failed: ${err}\n`);
       return c.json({ error: "The cut could not be requested." }, 500);
+    }
+  }
+  if (picked.action === "switch" && !picked.move) {
+    // The request body is not a source of truth for the running head or its catalog.
+    let menu: ReturnType<typeof shapeBrainHeads> = null;
+    let reason = "";
+    try {
+      const control = readBrainControl();
+      if (!control) reason = "control not configured";
+      else {
+        const res = await fetch(`http://127.0.0.1:${control.port}/heads`, {
+          headers: { Authorization: `Bearer ${control.token}` },
+          signal: AbortSignal.timeout(BRAIN_HEADS_TIMEOUT_MS),
+        });
+        if (!res.ok) reason = `HTTP ${res.status}`;
+        else {
+          menu = shapeBrainHeads(await res.json());
+          if (!menu) reason = "unreadable response";
+        }
+      }
+    } catch (err) {
+      const timeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      reason = timeout ? "timeout" : err instanceof SyntaxError ? "unreadable response" : "unreachable";
+    }
+    if (reason) process.stderr.write(`embervy-app: brain menu: /heads ${reason}; sending unchanged command\n`);
+    if (menu) {
+      picked = brainMenuCommand(body, menu);
+      if (!picked) return c.json({ error: S("brainMenu.error.invalid") }, 400);
     }
   }
   // Persist the UI origin so history can omit menu controls without hiding typed commands.

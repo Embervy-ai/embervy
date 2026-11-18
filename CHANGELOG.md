@@ -2,6 +2,51 @@
 
 Embervy uses [semantic versioning](https://semver.org/). The current version is in `VERSION`. Installed houses receive updates as letters, and every letter names the changes it carries.
 
+## 1.0.2 (2026-11-18)
+
+### Repairs
+
+- Memory workers: Mistral retired Mistral Medium 3.1, the default model of the nightly memory worker and the dream worker. From the night of 18 November both failed with `400 invalid model`. The default is now `mistralai/mistral-medium-3-5`, its direct successor. The dream worker's model can be set with `DREAM_LLM_MODEL`, as the nightly worker's already could with `DAEMON_LLM_MODEL`. **Both workers must be deployed again for this to take effect.** Nothing was lost in between: memory kept working, only the nightly sorting and the dream were skipped.
+- Claude Code houses: the inlet worker's repeat window works (a turn counter and a cache folder per session), so the same passage is not brought again turn after turn.
+- Settings: a Brain house no longer shows a leftover Model card.
+- The message actions button takes focus only when the menu is opened from the keyboard.
+
+### Security
+
+- `@hono/node-server` moves to 2.1.8 through the app's package override. Versions from 1.19.10 up to 2.1.3 decode a static request path twice (GHSA-rmxm-3fg6-px4f); the last version had moved to 1.19.19, which the advisory includes. The app serves its files with Hono's own `serveStatic` for Bun and does not call the affected function; the package is in the tree through the tool server's SDK.
+
+### App
+
+- A Markdown table in a message is shown as a table that stays readable at phone width; a wide table scrolls sideways inside its bubble.
+- A swipe that starts inside a part of a message that scrolls sideways no longer opens the terminal panel.
+- The terminal view loads older output on its own when the text is shorter than the panel.
+- On a permission card, Yes and No are the only buttons. The answer that adds a lasting rule to the agent's settings stands below them as a line of text with a note that says so.
+- The Brain menu recognises the running model with or without its window suffix and keeps the large window on a model change.
+
+### Inlet
+
+- Opt-in: with `INLET_THOUGHTS=1` the inlet adds the agent's own earlier observations on the turn's subject as a block of thoughts, between people and places and the chronicle. Off by default; a house that does not set it gets the same inlet as before. See `docs/inlet.md`. The score threshold is still being calibrated in our own houses.
+
+### Calendar
+
+- Recurring entries: the `calendar` tool adds a series in one call (weekdays, an end date, single days left out) and removes it by its series id, whole or from a given day on.
+
+### Runtime
+
+- Brain: an approval waits as long as its card instead of ending after about five minutes. A card that ends without an answer is closed in the app, a poll the app cannot answer is not a decision, and the message tells an unreachable endpoint from an unanswered card.
+- Brain: a turn that ends with an error names its kind, status code and error text in the session log.
+- Brain: the subscription state the Claude head reports with every turn is kept per account and shown as one line in `/status`.
+- Claude Code houses: the restart notice is sent after the loop has reloaded itself, once, and never holds the restart back.
+- The update hint for houses with their own look names `settings.html`.
+- Dream worker: every due run leaves its outcome (attempt, result, error class and status, never the provider's text) in the memory worker's `health` and in the doctor. Takes effect after the dream worker and the memory worker are deployed.
+- Claude Code houses: the status line records the subscription windows, and `Claude/scripts/setup-statusline.py` writes the status line into the settings file this house's Claude Code really reads.
+- Claude Code houses: a Kimi head defaults to `kimi-for-coding` with its 1M window.
+- Claude Code's reminder about silent turns is off by default on both runtimes.
+
+### Docs
+
+- `docs/room.md` says in its first sentence that the room itself is not included.
+
 ## 1.0.1 (2026-11-13)
 
 ### Security

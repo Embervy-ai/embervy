@@ -973,59 +973,135 @@
 
     html = escapeText(html);
 
-    // Worker images go through the authenticated same-origin proxy, so the browser never needs the worker's token.
-    html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
-      let src = safeUrl(sourceOf(url));
-      try {
-        const parsed = new URL(src, location.origin);
-        const match = parsed.pathname.match(/^\/images\/(\d+)$/);
-        if (match && parsed.origin !== location.origin) src = `/api/memory-image/${match[1]}`;
-      } catch {}
-      const label = sourceOf(alt);
-      let local = false;
-      try { local = src !== "#" && new URL(src, location.origin).origin === location.origin; } catch {}
-      return park(local
-        ? `<img src="${attr(src)}" alt="${attr(label)}" class="chat-image" loading="lazy">`
-        : `<a href="${attr(src)}" target="_blank" rel="noopener noreferrer">${escapeText(label || sourceOf(url))}</a>`, sourceOf(m));
-    });
+    function inline(html) {
+      // Worker images go through the authenticated same-origin proxy, so the browser never needs the worker's token.
+      html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
+        let src = safeUrl(sourceOf(url));
+        try {
+          const parsed = new URL(src, location.origin);
+          const match = parsed.pathname.match(/^\/images\/(\d+)$/);
+          if (match && parsed.origin !== location.origin) src = `/api/memory-image/${match[1]}`;
+        } catch {}
+        const label = sourceOf(alt);
+        let local = false;
+        try { local = src !== "#" && new URL(src, location.origin).origin === location.origin; } catch {}
+        return park(local
+          ? `<img src="${attr(src)}" alt="${attr(label)}" class="chat-image" loading="lazy">`
+          : `<a href="${attr(src)}" target="_blank" rel="noopener noreferrer">${escapeText(label || sourceOf(url))}</a>`, sourceOf(m));
+      });
 
-    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
+      html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
 
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label, url) =>
-      `${park(`<a href="${attr(safeUrl(sourceOf(url)))}" target="_blank" rel="noopener noreferrer">`, "")}${label}</a>`);
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label, url) =>
+        `${park(`<a href="${attr(safeUrl(sourceOf(url)))}" target="_blank" rel="noopener noreferrer">`, "")}${label}</a>`);
 
-    // Bare addresses become links too: a phone app gives no way to open an address
-    // that is only text. Closing punctuation is not part of the address.
-    let insideLink = false;
-    html = html.replace(/\u0000(\d+)\u0000|<\/a>|https?:\/\/[^\s<\u0000]+/g, (m, n) => {
-      if (n !== undefined) { if (parked[n].html.startsWith("<a ")) insideLink = true; return m; }
-      if (m === "</a>") { insideLink = false; return m; }
-      if (insideLink) return m;
-      const raw = sourceOf(m);
-      let address = raw.replace(/[.,;:!?*'"]+$/, "");
-      if (address.endsWith(")") && !address.includes("(")) address = address.replace(/\)+$/, "");
-      const href = safeUrl(address);
-      if (href === "#") return m;
-      return park(`<a href="${attr(href)}" target="_blank" rel="noopener noreferrer">${escapeText(address)}</a>`, address) + escapeText(raw.slice(address.length));
-    });
+      // Bare addresses become links too: a phone app gives no way to open an address
+      // that is only text. Closing punctuation is not part of the address.
+      let insideLink = false;
+      html = html.replace(/\u0000(\d+)\u0000|<\/a>|https?:\/\/[^\s<\u0000]+/g, (m, n) => {
+        if (n !== undefined) { if (parked[n].html.startsWith("<a ")) insideLink = true; return m; }
+        if (m === "</a>") { insideLink = false; return m; }
+        if (insideLink) return m;
+        const raw = sourceOf(m);
+        let address = raw.replace(/[.,;:!?*'"]+$/, "");
+        if (address.endsWith(")") && !address.includes("(")) address = address.replace(/\)+$/, "");
+        const href = safeUrl(address);
+        if (href === "#") return m;
+        return park(`<a href="${attr(href)}" target="_blank" rel="noopener noreferrer">${escapeText(address)}</a>`, address) + escapeText(raw.slice(address.length));
+      });
 
-    html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+      html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+      return html;
+    }
 
-    html = html
-      .split(/\n\n+/)
-      .map((p) => {
-        p = p.trim();
-        if (!p) return "";
-        const first = /^\u0000(\d+)\u0000/.exec(p);
-        if (first && parked[first[1]].block) return p;
-        return `<p>${p.replace(/\n/g, "<br>")}</p>`;
-      })
-      .filter(Boolean)
-      .join("");
+    function paragraphs(html) {
+      return html
+        .split(/\n\n+/)
+        .map((p) => {
+          p = p.trim();
+          if (!p) return "";
+          const first = /^\u0000(\d+)\u0000/.exec(p);
+          if (first && parked[first[1]].block) return p;
+          return `<p>${p.replace(/\n/g, "<br>")}</p>`;
+        })
+        .filter(Boolean)
+        .join("");
+    }
+
+    // Code placeholders have no pipes. Scan escapes instead of splitting blindly,
+    // and remove only actual outer delimiters so an empty first cell survives.
+    function cells(line) {
+      const parts = [];
+      const s = line.trim();
+      let cell = "", hasPipe = false, lastPipe = -1;
+      for (let i = 0; i < s.length; i++) {
+        if (s[i] === "\\" && (s[i + 1] === "|" || s[i + 1] === "\\")) {
+          cell += s[i + 1] === "|" ? "|" : "\\\\";
+          i++;
+        } else if (s[i] === "|") {
+          parts.push(cell.trim());
+          cell = "";
+          hasPipe = true;
+          lastPipe = i;
+        } else cell += s[i];
+      }
+      parts.push(cell.trim());
+      if (s.startsWith("|")) parts.shift();
+      if (lastPipe === s.length - 1 && hasPipe) parts.pop();
+      return { parts, hasPipe };
+    }
+
+    function alignment(line) {
+      if (!line || !/^[\s|:-]+$/.test(line)) return null;
+      const parts = cells(line).parts;
+      if (!parts.length || !parts.every(cell => /^:?-{3,}:?$/.test(cell))) return null;
+      return parts.map(cell => cell.endsWith(":")
+        ? (cell.startsWith(":") ? "ta-center" : "ta-right") : "ta-left");
+    }
+
+    const restoreHtml = (s) => s.replace(PLACEHOLDER, (_m, n) => parked[n].html);
+    const hasBlock = (line) => /\u0000(\d+)\u0000/g.test(line) &&
+      [...line.matchAll(/\u0000(\d+)\u0000/g)].some(m => parked[m[1]].block);
+    const lines = html.split("\n");
+    const output = [];
+    let textStart = 0;
+    for (let i = 0; i + 1 < lines.length; i++) {
+      if (!lines[i].includes("|") || hasBlock(lines[i])) continue;
+      const align = alignment(lines[i + 1]);
+      if (!align) continue;
+      const header = cells(lines[i]);
+      if (!header.hasPipe || !header.parts.length) continue;
+      if (i > textStart) output.push(paragraphs(inline(lines.slice(textStart, i).join("\n"))));
+      const width = Math.max(header.parts.length, align.length);
+      function row(parts, heading) {
+        const tag = heading ? "th" : "td";
+        const out = [];
+        // Extra cells stay visible; missing cells are padded to the declared width.
+        for (let col = 0; col < Math.max(width, parts.length); col++) {
+          const cls = align[col] || "ta-left";
+          out.push(`<${tag} class="${cls}">${restoreHtml(inline(parts[col] || ""))}</${tag}>`);
+        }
+        return `<tr>${out.join("")}</tr>`;
+      }
+      const head = row(header.parts, true);
+      const body = [];
+      let end = i + 2;
+      while (end < lines.length && lines[end].trim() && lines[end].includes("|") && !hasBlock(lines[end])) {
+        body.push(row(cells(lines[end]).parts, false));
+        end++;
+      }
+      // Cells are restored before parking the whole block: final restoration stays
+      // single-pass, and neither inline rules nor paragraphs can enter table tags.
+      output.push(park(`<div class="markdown-table-scroll"><table class="markdown-table"><thead>${head}</thead><tbody>${body.join("")}</tbody></table></div>`, "", true));
+      textStart = end;
+      i = end - 1;
+    }
+    output.push(paragraphs(inline(lines.slice(textStart).join("\n"))));
+    html = output.join("");
 
     // Restore once so generated HTML is never parsed as Markdown or as another placeholder.
-    return html.replace(PLACEHOLDER, (_m, n) => parked[n].html);
+    return restoreHtml(html);
   }
 
   const approvalStates = new Map();
@@ -1033,11 +1109,17 @@
   let houseQuestionBusy = false;
   function renderHouseQuestionCard(question, submitted) {
     const detail = renderHouseQuestionDetail(question);
-    // Only the structured presentation adopts approval actions; fallback cards stay unchanged.
+    // Primary action roles require structured details; lasting answers need a warning even in fallback layouts.
     const structured = detail.startsWith('<div class="house-permission-detail">');
+    const lastingActions = [];
     const actions = question.closed === true || question.readonly === true ? "" : question.enter === true && question.options.length === 0
       ? `<button type="button" data-house-enter="true"${submitted ? " disabled" : ""}>${escapeHtml(t("houseQuestion.continue"))}</button>`
       : question.options.map((option, index) => {
+        // The session's answer text identifies a lasting rule, not its position or number.
+        if (question.permission === true && option.label.includes("don't ask again")) {
+          lastingActions.push(`<div class="approval-actions"><button type="button" class="approval-lasting" data-house-number="${option.number}"${submitted ? " disabled" : ""}>${escapeHtml(option.label)}<br><small>${escapeHtml(t("houseQuestion.lastingRule"))}</small></button></div>`);
+          return "";
+        }
         const role = structured ? (index === 0 ? "approval-allow" : index === question.options.length - 1 ? "approval-deny" : "") : "";
         return `<button type="button"${role ? ` class="${role}"` : ""} data-house-number="${option.number}"${submitted ? " disabled" : ""}>${escapeHtml(option.label)}</button>`;
       }).join("");
@@ -1050,7 +1132,7 @@
       detail +
       (question.closed || question.readonly === true ? "" : `<div class="${structured ? "house-permission-hint" : "approval-title"}">${escapeHtml(t("houseQuestion.terminal"))}</div>`) +
       (!question.closed && question.deadlineAt ? `<div class="${structured ? "house-permission-deadline" : "approval-title"}" data-house-deadline="${Number(question.deadlineAt)}">${escapeHtml(houseQuestionTime(question.deadlineAt))}</div>` : "") +
-      `<div class="approval-actions">${actions}</div>` +
+      `<div class="approval-actions">${actions}</div>` + lastingActions.join("") +
       `<div class="approval-status" role="status">${escapeHtml(status)}</div></div>`;
   }
   const HOUSE_DEADLINE_NOTICE = "⚠ Claude Code will automatically block this request at the deadline, to avoid holding up an unattended session";
@@ -1575,7 +1657,9 @@
   }
   function addKeptActions(div, msgId) {
     if (!msgId || div.querySelector("[data-house-question]")) return;
-    const button = keptButton("⋯", () => showEmojiPicker(div, msgId));
+    // Native Enter/Space (and assistive activation) clicks have detail 0 and
+    // no pointer type. Do not transfer focus for mouse, pen or touch clicks.
+    const button = keptButton("⋯", (event) => showEmojiPicker(div, msgId, event.detail === 0 && !event.pointerType));
     button.className = "message-actions";
     button.title = t("kept.actions");
     button.setAttribute("aria-label", t("kept.actions"));
@@ -1713,7 +1797,7 @@
     document.getElementById("kept-btn")?.focus();
   });
 
-  function showEmojiPicker(msgEl, msgId) {
+  function showEmojiPicker(msgEl, msgId, keyboard = false) {
     if (msgEl.querySelector?.("[data-house-question]")) return;
     const old = document.querySelector(".emoji-picker");
     if (old) old.remove();
@@ -1739,7 +1823,7 @@
     if (msgId) addButton("🔖", () => toggleKept(msgId), keptEntries.some(entry => entry.message_id === msgId) ? t("kept.remove") : t("kept.keep"));
 
     msgEl.appendChild(picker);
-    firstButton?.focus?.();
+    if (keyboard) firstButton?.focus?.();
     picker.addEventListener("keydown", (event) => {
       if (event.key === "Escape") { picker.remove(); msgEl.querySelector(".message-actions")?.focus(); }
     });
@@ -2505,6 +2589,10 @@
   let terminalLastFrameAt = 0;
   let terminalHistoryOffset = 0;
   let terminalHistoryLoading = false;
+  let terminalHistoryRequestPending = false;
+  let terminalAutoHistoryCount = 0;
+  let terminalAutoHistoryStopped = false;
+  let terminalHistoryMessage = () => t("terminal.history.hint");
   let terminalHasMoreHistory = true;
   let terminalLogLive = [];
   let terminalLogHistory = [];
@@ -2659,7 +2747,26 @@
   function terminalHistoryMoved() {
     terminalLogAnchorLost = true;
     terminalHasMoreHistory = false;
-    if (terminalHistoryState) terminalHistoryState.textContent = t("terminal.history.moved");
+    terminalHistoryMessage = () => t("terminal.history.moved");
+    refreshTerminalHistory();
+  }
+  function refreshTerminalHistory() {
+    if (!terminalOpen || !terminalScroll) return;
+    const oldHeight = terminalScroll.scrollHeight;
+    const oldTop = terminalScroll.scrollTop;
+    const scrollable = oldHeight > terminalScroll.clientHeight;
+    const message = terminalHistoryLoading ? t("terminal.history.loading") : scrollable ? terminalHistoryMessage() : "";
+    if (terminalHistoryState && terminalHistoryState.textContent !== message) terminalHistoryState.textContent = message;
+    // The hint is inside the scroller, so changing its height must preserve the reading position too.
+    if (terminalScroll.scrollHeight !== oldHeight && !terminalAwaitingFrame) {
+      if (terminalFollowing) scrollTerminalLive();
+      else terminalScroll.scrollTop = oldTop + terminalScroll.scrollHeight - oldHeight;
+    }
+    // Frames and programmatic scroll events must not renew the automatic budget.
+    if (terminalScroll.scrollHeight <= terminalScroll.clientHeight && !terminalAwaitingFrame && !terminalHistoryLoading && !terminalHistoryRequestPending
+      && terminalHasMoreHistory && !terminalAutoHistoryStopped && terminalAutoHistoryCount < 8) {
+      void loadTerminalHistory();
+    }
   }
   function paintTerminalFrame(msg) {
     const oldTop = terminalScroll?.scrollTop;
@@ -2695,6 +2802,7 @@
       requestAnimationFrame(settleTerminalAtNewest);
     } else if (terminalFollowing) scrollTerminalLive();
     else if (terminalScroll) terminalScroll.scrollTop = oldTop;
+    refreshTerminalHistory();
   }
   async function terminalLogPage(query, serial) {
     const res = await fetch(`/api/terminal/history?mode=log&lines=200&${query}`, { credentials: "include" });
@@ -2710,6 +2818,7 @@
     const pending = terminalPendingLogFrame;
     terminalPendingLogFrame = null;
     if (pending && !terminalLogAnchorLost) renderTerminalFrame(pending);
+    refreshTerminalHistory();
   }
   async function updateTerminalLog(msg) {
     const serial = terminalViewSerial;
@@ -2739,7 +2848,10 @@
       terminalLogLive = next;
       paintTerminalFrame(msg);
     } catch {
-      if (serial === terminalViewSerial && terminalHistoryState) terminalHistoryState.textContent = t("terminal.history.unavailable");
+      if (serial === terminalViewSerial) {
+        terminalAutoHistoryStopped = true;
+        terminalHistoryMessage = () => t("terminal.history.unavailable");
+      }
     } finally { flushTerminalLogFrame(serial); }
   }
   function renderTerminalFrame(msg) {
@@ -2756,6 +2868,7 @@
   }
   function settleTerminalAtNewest() {
     if (terminalOpen && !terminalReaderMoved && !terminalAwaitingFrame) scrollTerminalLive();
+    refreshTerminalHistory();
   }
   function resetTerminalView() {
     terminalOutput?.replaceChildren();
@@ -2764,6 +2877,9 @@
     terminalReaderMoved = false;
     terminalHistoryOffset = 0;
     terminalHistoryLoading = false;
+    terminalAutoHistoryCount = 0;
+    terminalAutoHistoryStopped = false;
+    terminalHistoryMessage = () => t("terminal.history.hint");
     terminalLogLive = [];
     terminalLogHistory = [];
     terminalPendingLogFrame = null;
@@ -2771,7 +2887,7 @@
     terminalHasMoreHistory = true;
     terminalFollowing = true;
     terminalLastFrameAt = 0;
-    if (terminalHistoryState) terminalHistoryState.textContent = t("terminal.history.hint");
+    if (terminalHistoryState) terminalHistoryState.textContent = "";
     if (terminalFreshness) terminalFreshness.textContent = t("terminal.connecting");
   }
   function renderTerminalModeBtn() {
@@ -2791,9 +2907,13 @@
     terminalLiveBtn?.classList.remove("visible");
   }
   async function loadTerminalHistory() {
-    if (!terminalOpen || terminalAwaitingFrame || terminalHistoryLoading || !terminalHasMoreHistory || !terminalOutput || !terminalScroll || !terminalPanelEnabled()) return;
+    if (!terminalOpen || terminalAwaitingFrame || terminalHistoryLoading || terminalHistoryRequestPending || !terminalHasMoreHistory || !terminalOutput || !terminalScroll || !terminalPanelEnabled()) return;
+    // Restoring a position can emit scroll events too; only human input renews the budget.
+    if (terminalAutoHistoryStopped || terminalAutoHistoryCount >= 8) return;
+    terminalAutoHistoryCount++;
     terminalHistoryLoading = true;
-    if (terminalHistoryState) terminalHistoryState.textContent = t("terminal.history.loading");
+    terminalHistoryRequestPending = true;
+    refreshTerminalHistory();
     const serial = terminalViewSerial;
     try {
       if (terminalMode === "log") {
@@ -2802,29 +2922,47 @@
         const data = await terminalLogPage(`before=${encodeURIComponent(before)}`, serial);
         if (!data) return;
         const oldHeight = terminalScroll.scrollHeight;
-        terminalLogHistory.unshift(...(data.lines || []));
-        terminalHasMoreHistory = data.nextBefore != null && (data.lines || []).length > 0;
+        const oldTop = terminalScroll.scrollTop;
+        const known = new Set([...terminalLogHistory, ...terminalLogLive].map(item => item.key));
+        const lines = (data.lines || []).filter(item => {
+          if (known.has(item.key)) return false;
+          known.add(item.key);
+          return true;
+        });
+        terminalLogHistory.unshift(...lines);
+        terminalHasMoreHistory = data.nextBefore != null && lines.length > 0 && data.nextBefore !== before;
         paintTerminalFrame({});
-        terminalScroll.scrollTop += terminalScroll.scrollHeight - oldHeight;
-        if (terminalHistoryState) terminalHistoryState.textContent = terminalHasMoreHistory ? t("terminal.history.more") : t("terminal.history.start");
-        return;
+        if (terminalFollowing) scrollTerminalLive();
+        else terminalScroll.scrollTop = oldTop + terminalScroll.scrollHeight - oldHeight;
+      } else {
+        const res = await fetch(`/api/terminal/history?lines=200&offset=${terminalHistoryOffset}&mode=${terminalMode}`, { credentials: "include" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (serial !== terminalViewSerial || !terminalOpen) return;
+        const oldHeight = terminalScroll.scrollHeight;
+        const oldTop = terminalScroll.scrollTop;
+        let history = terminalOutput.querySelector(".terminal-history");
+        if (!history) { history = document.createElement("span"); history.className = "terminal-history"; terminalOutput.prepend(history); }
+        const fragment = document.createDocumentFragment();
+        for (const item of data.lines || []) fragment.appendChild(renderLogItem(item));
+        history.prepend(fragment);
+        terminalHasMoreHistory = data.nextOffset > terminalHistoryOffset && (data.lines || []).length > 0;
+        terminalHistoryOffset = data.nextOffset ?? terminalHistoryOffset;
+        // Read position is sampled after the request: the reader may move while it is in flight.
+        if (terminalFollowing) scrollTerminalLive();
+        else terminalScroll.scrollTop = oldTop + terminalScroll.scrollHeight - oldHeight;
       }
-      const res = await fetch(`/api/terminal/history?lines=200&offset=${terminalHistoryOffset}&mode=${terminalMode}`, { credentials: "include" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (serial !== terminalViewSerial) return;
-      const oldHeight = terminalScroll.scrollHeight;
-      let history = terminalOutput.querySelector(".terminal-history");
-      if (!history) { history = document.createElement("span"); history.className = "terminal-history"; terminalOutput.prepend(history); }
-      const fragment = document.createDocumentFragment();
-      for (const item of data.lines || []) fragment.appendChild(renderLogItem(item));
-      history.prepend(fragment);
-      terminalHistoryOffset = data.nextOffset ?? terminalHistoryOffset;
-      terminalHasMoreHistory = data.nextOffset !== null && (data.lines || []).length > 0;
-      terminalScroll.scrollTop += terminalScroll.scrollHeight - oldHeight;
-      if (terminalHistoryState) terminalHistoryState.textContent = terminalHasMoreHistory ? t("terminal.history.more") : t("terminal.history.start");
-    } catch { if (serial === terminalViewSerial && terminalHistoryState) terminalHistoryState.textContent = t("terminal.history.unavailable"); }
-    finally { flushTerminalLogFrame(serial); }
+      terminalHistoryMessage = terminalHasMoreHistory ? () => t("terminal.history.more") : () => t("terminal.history.start");
+    } catch {
+      if (serial === terminalViewSerial) {
+        terminalAutoHistoryStopped = true;
+        terminalHistoryMessage = () => t("terminal.history.unavailable");
+      }
+    } finally {
+      terminalHistoryRequestPending = false;
+      flushTerminalLogFrame(serial);
+      refreshTerminalHistory();
+    }
   }
   function openTerminal() {
     if (!terminalPanelEnabled() || !terminalPanel || terminalOpen) return;
@@ -2859,19 +2997,39 @@
     const distance = terminalScroll.scrollHeight - terminalScroll.scrollTop - terminalScroll.clientHeight;
     terminalFollowing = distance < 32;
     terminalLiveBtn?.classList.toggle("visible", !terminalFollowing);
-    if (terminalScroll.scrollTop < 80) loadTerminalHistory();
+    if (terminalReaderMoved && terminalScroll.scrollTop < 80 && terminalScroll.scrollHeight > terminalScroll.clientHeight) loadTerminalHistory();
+    refreshTerminalHistory();
   }, { passive: true });
   for (const type of ["touchstart", "wheel", "pointerdown", "keydown"]) {
-    terminalScroll?.addEventListener(type, () => { terminalReaderMoved = true; }, { passive: true });
+    terminalScroll?.addEventListener(type, () => {
+      terminalReaderMoved = true;
+      terminalAutoHistoryCount = 0;
+      terminalAutoHistoryStopped = false;
+      refreshTerminalHistory();
+    }, { passive: true });
   }
   terminalPanel?.addEventListener("transitionend", (event) => {
     if (event.target === terminalPanel) settleTerminalAtNewest();
   });
+  function startsInSidewaysScroller(target) {
+    // Only inside a message: within the terminal itself the swipe still closes it.
+    const message = target instanceof Element ? target.closest(".message") : null;
+    for (let el = message ? target : null; el && el !== message; el = el.parentElement) {
+      if (el.scrollWidth > el.clientWidth + 1) {
+        const overflowX = getComputedStyle(el).overflowX;
+        if (overflowX === "auto" || overflowX === "scroll") return true;
+      }
+    }
+    return false;
+  }
   let terminalTouchX = null;
   let terminalTouchY = null;
   document.addEventListener("touchstart", (event) => {
     // The overlay owns gestures even if this listener receives a bubbled event.
     if (document.querySelector(".lightbox-overlay")) { terminalTouchX = terminalTouchY = null; return; }
+    // A swipe that starts inside a sideways-scrolling part of a message (a table,
+    // a code box) scrolls that part and opens no panel.
+    if (startsInSidewaysScroller(event.target)) { terminalTouchX = terminalTouchY = null; return; }
     const touch = event.changedTouches[0];
     terminalTouchX = touch?.clientX ?? null;
     terminalTouchY = touch?.clientY ?? null;

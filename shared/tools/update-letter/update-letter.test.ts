@@ -402,6 +402,26 @@ describe("update letter", () => {
     expect(existsSync(join(house, "file.txt.embervy-merged"))).toBe(false);
   });
 
+  for (const path of ["settings.html", "Claude/app/public/settings.html"]) {
+    for (const state of ["diverged", "merge-clean", "kept", "already", "replace", "new"]) {
+      test(`settings version reminder for ${state} ${path} preserves the fixed wording`, () => {
+        const resident = state === "diverged" ? "resident fifth\n"
+          : state === "already" ? upstreamText
+          : state === "replace" ? baseText
+          : state === "kept" ? "house heading\n" + upstreamText : residentText;
+        const { letter, house } = mergeFixture(baseText, upstreamText, resident, path);
+        if (state === "new") rmSync(join(house, path));
+        const hint = `versions ${path} — keep your asset versions and service-worker cache number above the letter's, with a house suffix (for example ?v=115-h1 and embervy-v30-h1), so phones fetch the new files.`;
+        for (const name of ["check", "apply"]) {
+          const output = operation(letter, house, name);
+          expect(output.split("\n").filter(line => line.startsWith("versions "))).toEqual(["merge-clean", "diverged"].includes(state) ? [hint] : []);
+        }
+        const paragraph = "When `sw.js`, `index.html` or `settings.html` is `merge-clean` or `diverged`, check and apply remind you to keep your asset versions and service-worker cache number above the letter's, with a house suffix, so phones fetch the new files. For house changes, raise the asset `?v=` values in `index.html`, `settings.html` and `sw.js` and the `CACHE_NAME` in `sw.js`, using a house suffix such as `?v=115-h1` and `embervy-v30-h1`; increase the suffix for later house changes. Letters only raise the plain number, without a house suffix.";
+        expect(readFileSync(join(letter, "UPDATE.md"), "utf8")).toContain(paragraph);
+      });
+    }
+  }
+
   for (const path of ["sw.js", "index.html", "Claude/app/public/sw.js", "Claude/app/public/index.html", "file.txt", "app.js", "style.css"]) {
     for (const state of ["diverged", "merge-clean", "kept", "already", "replace", "new"]) {
       test(`version reminder for ${state} ${path}`, () => {

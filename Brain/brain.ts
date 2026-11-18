@@ -51,6 +51,9 @@ import { approvalMatch, createApprovalSettingsReader, loadApprovalRules } from "
 import { catchUpArchiveName, readArchiveLedger, recordArchive, seedArchiveLedger, type ArchiveReceipt } from "./archive-ledger";
 import { houseCheckBlock, houseCheckMessage, runStartupDoctor, type HouseFinding } from "./house-check";
 import { approvalSettingsArg, pipeApprovalMatch, type ApprovalHookOptions } from "./approval-hook";
+import { deadlineFetch } from "./brain-mcp";
+
+const approvalWaits = new ApprovalWaits();
 import { sweepOrphanedClaudePipeTempDirs } from "./secure-temp";
 import { formatToolUse, formatHelperActivity, formatHelperCount, liveViewEnabled, isTerminalReply, toolLogPreview, type HelperActivity } from "./live-view";
 import { residentTaskActivity, type ResidentTaskEntry } from "./resident-tasks";
@@ -62,10 +65,11 @@ import {
   appendDueReminders, lateReminders, markRemindersDelivered, readCalendars, readFreshWarning, readPendingReminders, renderSense,
   REMINDER_TAG, reminderEscalationText, weatherCacheFromOpenMeteo, weatherLine, type SenseState, type WeatherCache,
 } from "./sense";
-import { appMcpServer, appBroadcast, appReplySpeech, isAppReplyTool, askApproval, channelTag, commitCursor, inboxConsoleLine, isForeignEntry, isPeerTool, isRoomTool, loadCursor, toolCallSpeech, readInbox, saveCursor, inboxBatchBytes, type InboxCursor } from "./app-channel";
+import { appMcpServer, appBroadcast, appReplySpeech, isAppReplyTool, ApprovalWaits, approvalFailure, channelTag, commitCursor, inboxConsoleLine, isForeignEntry, isPeerTool, isRoomTool, loadCursor, toolCallSpeech, readInbox, saveCursor, inboxBatchBytes, type InboxCursor } from "./app-channel";
 import { createBrainEcho, isBrainEcho } from "./echo";
 import { ModelCatalogCache, modelsListRequest, probeClaudeModels, probeGptModels, probeListModels, type CatalogReadMode, type ModelInfo } from "./head-models";
 import { accountSeamFromEnv, type RateLimitInfo } from "./account";
+import { LimitsStore, formatLimitsStatus } from "./limits";
 import { headFile } from "./head-file";
 import { projectionSeamFromEnv } from "./projection";
 import { isScheduledTurn, roomUserSpeaker, outreachSpeech, isMailCall, toolOutreachDelivered, resolveOutreachRecords } from "./wake-bridge";
@@ -100,7 +104,10 @@ function loadEnv(path: string, only?: Set<string>, target: Record<string, string
       value = value.slice(1, -1);
     }
     const explicitLockOff = match[1] === "BRAIN_LOCK_FILE" && target[match[1]] === "";
-    if (!explicitLockOff && !target[match[1]]?.trim() && (value.trim() || match[1] === "BRAIN_LOCK_FILE")) {
+    // This CLI switch distinguishes unset (our default) from explicitly empty.
+    const silentTurnReminder = match[1] === "CLAUDE_CODE_SILENT_TURN_REMINDER";
+    if (silentTurnReminder ? target[match[1]] === undefined
+      : !explicitLockOff && !target[match[1]]?.trim() && (value.trim() || match[1] === "BRAIN_LOCK_FILE")) {
       target[match[1]] = value;
       if (target === process.env) fileEnvAtStartup.set(match[1], value);
     }
@@ -336,6 +343,7 @@ export const PIPE_PROFILE_KEYS = [
   "BRAIN_ENABLE_TOOLS", "BRAIN_DISALLOWED_TOOLS", "BRAIN_NOTES_DIR", "BRAIN_NOTES_MAX_BYTES",
   "BRAIN_TOOL_RULES_FILE", "BRAIN_CONTEXT_FILE_MAX_BYTES",
   "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+  "CLAUDE_CODE_SILENT_TURN_REMINDER",
   ...HEAD_NAMES.flatMap((head) => ["SYSTEM_PROMPT_MODE", "ENABLE_TOOLS", "DISALLOWED_TOOLS"].map((suffix) => `BRAIN_${head.toUpperCase()}_${suffix}`)),
 ];
 
@@ -357,7 +365,9 @@ export interface PipeProfile {
 
 export function readPipeProfile(env: Record<string, string | undefined>): PipeProfile {
   const selected = Object.fromEntries(PIPE_PROFILE_KEYS.map((key) => [key, env[key]]));
-  const stamps = Object.fromEntries(PIPE_PROFILE_KEYS.map((key) => [key, createHash("sha256").update(env[key] ?? "").digest("hex")]));
+  // For the reminder, unset means "0", not empty; /reload must notice that change.
+  const stamps = Object.fromEntries(PIPE_PROFILE_KEYS.map((key) => [key, createHash("sha256")
+    .update(env[key] ?? (key === "CLAUDE_CODE_SILENT_TURN_REMINDER" ? "0" : "")).digest("hex")]));
   const cwd = env.BRAIN_CLAUDE_CWD ?? HERE;
   for (const [key, value] of [
     ["BRAIN_CLAUDE_SETTINGS", env.BRAIN_CLAUDE_SETTINGS ?? "{}"],
@@ -398,6 +408,7 @@ if (PROMPT_RUN || (STERILE && process.env.BRAIN_LOCK_FILE === undefined)) proces
 const LOCK_FILE = lockFileFromEnv(STATE_DIR);
 const PARALLEL_PATTERN = PROMPT_RUN ? "" : process.env.BRAIN_PARALLEL_PATTERN ?? "";
 export const ACCOUNT = accountSeamFromEnv(process.env, STATE_DIR, homedir());
+export const LIMITS = new LimitsStore(join(STATE_DIR, "limits.json"), { log: logEvent });
 export const PROJECTION = projectionSeamFromEnv(process.env);
 export const JUMP = jumpSeamFromEnv(process.env, { logDir: LOG_DIR, sterile: STERILE, log: logEvent });
 
@@ -1193,7 +1204,7 @@ export async function dispatchLocalTool(name: string, args: Record<string, any>,
       return `error: memory search failed: ${String(error)}`;
     }
   }
-  if (WEB_TOOL_NAMES.has(name)) return runWebTool(WEB, name, args);
+  if (WEB_TOOL_NAMES.has(name)) return runWebTool(WEB, name, args, { fetch: deadlineFetch });
   if (name === "read_file") {
     const full = jailResolve(args.path);
     if (!full) return "error: path is outside the read-only workspace jail";
@@ -2641,16 +2652,20 @@ async function approvalGate(name: string, args: Record<string, unknown>): Promis
   const match = approvalMatch(approvalSettings?.() ?? APPROVAL_RULES, APPROVAL_MODE, name, args, { cwd: workspaceRoot() ?? process.cwd() });
   if (!match) return null;
   if (RESIDENT_TOOL_NAMES.has(name) && !residentToolOffered(name)) return null; // refuses on its own
-  if (!APP_URL) return "error: approval required but BRAIN_APP_URL is not set — action not performed";
+  if (!APP_URL) {
+    logEvent({ type: "approval_decision", tool: name, decision: "error", outcome: "unreachable", wait_ms: 0, ...match });
+    return "error: approval endpoint unreachable: BRAIN_APP_URL is not set — action not performed";
+  }
   const detail = JSON.stringify(toolRecords.input(name, undefined, args), null, 2).slice(0, 1500);
   const title = tr("{0}: {1} — {2}", WORKER_NAME, name, tr(match.label));
-  const { decision } = await askApproval({ baseUrl: APP_URL, token: APP_TOKEN }, title, detail, "brain");
-  logEvent({ type: "approval_decision", tool: name, decision, ...match });
+  const { decision, outcome } = await approvalWaits.ask({ baseUrl: APP_URL, token: APP_TOKEN,
+    onEnd: (event) => logEvent({ ...event, tool: name, ...match }),
+  }, title, detail, "brain");
   if (decision === "allow") return null;
-  return `error: ${USER_NAME} did not approve '${name}' (${decision}) — action not performed`;
+  return `error: ${outcome === "deny" ? `${USER_NAME} did not approve '${name}' (deny)` : approvalFailure(outcome)} — action not performed`;
 }
 
-async function dispatchTool(name: string, args: Record<string, unknown>, state?: RuntimeState): Promise<string> {
+export async function dispatchTool(name: string, args: Record<string, unknown>, state?: RuntimeState): Promise<string> {
   const refusal = await approvalGate(name, args);
   if (refusal) return refusal;
   if (name === "effort" && state) return (await applyEffort(state, args?.level === undefined ? undefined : String(args.level), "agent")).text;
@@ -2659,7 +2674,10 @@ async function dispatchTool(name: string, args: Record<string, unknown>, state?:
   if (split && state?.mcpClients?.has(split.server)) {
     const client = state.mcpClients.get(split.server)!;
     if (!client.alive()) return `error: MCP server ${split.server} is not running`;
-    return client.callTool(split.tool, args);
+    // App tools may wait for a person; leave room for the card deadline and cleanup.
+    const appServer = appMcpServer();
+    const humanWait = ["app", appServer, appServer.replace(/-/g, "_")].includes(split.server);
+    return client.callTool(split.tool, args, humanWait ? 1_900_000 : 600_000);
   }
   if (MEMORY_URL && MEMORY_KEY) return memoryToolCall(name, args);
   return `error: tool '${name}' is not available because memory MCP is not configured`;
@@ -3057,7 +3075,7 @@ export function headWebPlan(head: HeadSpec): WebToolPlan {
 
 function brainMcpConfigPath(): string {
   const path = join(STATE_DIR, "brain-mcp.json");
-  const config = { mcpServers: { brain: { command: process.execPath, args: [join(HERE, "brain-mcp.ts")] } } };
+  const config = { mcpServers: { brain: { command: process.execPath, args: [join(HERE, "brain-mcp.ts")], env: { BRAIN_APPROVAL_LOG: SESSION_LOG } } } };
   try {
     mkdirSync(STATE_DIR, { recursive: true });
     writeFileSync(path, JSON.stringify(config, null, 2));
@@ -3190,6 +3208,8 @@ async function ensurePipe(state: RuntimeState, head: HeadSpec, reason = "turn"):
     disallowedTools: mergeDisallowedTools(permission.disallowedTools, web.disallowedTools, pipeBuiltinDisallowedTools(head, env)),
     effort: birthEffort(head, state.effort, catalogEffortLevels(head)),
     logEvent,
+    onLimits: head.name === "claude" && !head.pipeEnv.ANTHROPIC_BASE_URL
+      ? (info, model) => LIMITS.observe(account.name, info, model) : undefined,
     toolRecords,
     onCanonicalEvent: (event) => {
       logTurn({ ...(event as unknown as Record<string, unknown>), origin: "claude_pipe" });
@@ -4237,6 +4257,8 @@ function statusText(state: RuntimeState): string {
   const head = currentHead(state);
   const t = thresholds(state);
   const pct = state.lastPromptTokens ? Math.round((100 * state.lastPromptTokens) / head.contextWindow) : 0;
+  const limits = head.name === "claude" && !head.pipeEnv.ANTHROPIC_BASE_URL
+    ? formatLimitsStatus(LIMITS.snapshot(ACCOUNT.name()), brainTimezone()) : null;
   return [
     `head: ${head.name} (${head.transport}) · model: ${head.model}${state.servedModel ? ` · served: ${state.servedModel}` : ""}${head.unavailable ? ` · UNAVAILABLE: ${head.unavailable}` : ""}`,
     `effort: ${state.effort ?? "default"} · runs as ${effortLabel(state) ?? "the model's default"} (${headEffortSupport(head).via})${state.pendingRebirth ? ` · restart pending (${state.pendingRebirth})` : ""}`,
@@ -4247,6 +4269,7 @@ function statusText(state: RuntimeState): string {
     `queue: ${queue.length} · busy: ${busy || pipeTurnOpen(state)}${!busy && pipeTurnOpen(state) ? " (self-started pipe turn)" : ""} · inlet: ${inletOn ? "on" : "off"} · ${tr("cache ping")}: ${cachePingEnabled(CACHE_PING_MODE, head) ? "on" : "off"} (${cachePingMinutes(head, process.env)} min)`,
     ...(APPROVAL_MODE === "app" ? [`approvals: app · rules ${APPROVAL_RULES.source === "off" ? "off" : "on"} (${APPROVAL_RULES.rules.length}) · always ask: ${[...APPROVAL_RULES.alwaysAsk].join(",") || "none"}`] : []),
     webStatusLine(headWebPlan(head)),
+    ...(limits ? [limits] : []),
   ].join("\n");
 }
 
@@ -4769,6 +4792,7 @@ async function shutdown(state: RuntimeState, reason: string, code = 0): Promise<
     return;
   }
   shuttingDown = true;
+  await approvalWaits.stop();
   cutInProgress = true;
   state.claudeAuth?.watcher?.close();
   if (state.claudeAuth?.timer) clearInterval(state.claudeAuth.timer);
@@ -4808,6 +4832,7 @@ function idleTick(state: RuntimeState): void {
     logEvent({ type: "reminders_escalated", ids: late.map((row) => row.id) });
   }
   const head = currentHead(state);
+  if (head.name === "claude" && !head.pipeEnv.ANTHROPIC_BASE_URL) LIMITS.snapshot(ACCOUNT.name());
   const overage = rateLimitBlocks(state.lastRateLimit, Date.now());
   if (cachePingDue({
     nowMs: Date.now(), lastModelCallAt: state.lastModelCallAt ?? 0, idleMin: cachePingMinutes(head, process.env), busy: busy || pipeBusy, queued: queue.length,
@@ -4868,7 +4893,7 @@ export function headsSnapshot(state: RuntimeState, claudeModels: ModelInfo[] | n
   };
 }
 
-export async function handleControlTool(state: RuntimeState, name: string, args: any): Promise<{ ok: boolean; text?: string; error?: string }> {
+export async function handleControlTool(state: RuntimeState, name: string, args: any, signal?: AbortSignal): Promise<{ ok: boolean; text?: string; error?: string }> {
   if (name === "approval_settings_check") {
     approvalSettings?.();
     return { ok: true, text: "checked" };
@@ -4878,7 +4903,7 @@ export async function handleControlTool(state: RuntimeState, name: string, args:
   }
   if (name === "status") return { ok: true, text: statusText(state) };
   if (WEB_TOOL_NAMES.has(name)) {
-    const text = await runWebTool(WEB, name, args ?? {});
+    const text = await runWebTool(WEB, name, args ?? {}, { fetch: deadlineFetch });
     return text.startsWith("error:") ? { ok: false, error: text.slice("error:".length).trim() } : { ok: true, text };
   }
   if (name === "effort") {
@@ -4890,15 +4915,19 @@ export async function handleControlTool(state: RuntimeState, name: string, args:
     const detail = JSON.stringify(toolRecords.input(toolName, args?.tool_use_id, args?.input ?? {}), null, 2).slice(0, 1500);
     const match = pipeApprovalMatch(approvalSettings?.() ?? APPROVAL_RULES, APPROVAL_MODE, toolName, args?.input ?? {}, { cwd: pipeEnvironment(state).BRAIN_CLAUDE_CWD ?? HERE, scratch: pipeEnvironment(state).BRAIN_APPROVAL_SCRATCH ?? "" });
     if (approvalSettings && !match) return { ok: true, text: JSON.stringify({ behavior: "allow", updatedInput: args?.input ?? {} }) };
-    if (!APP_URL) return { ok: true, text: JSON.stringify({ behavior: "deny", message: "no app configured for approvals (BRAIN_APP_URL)" }) };
+    if (!APP_URL) {
+      logEvent({ type: "approval_decision", tool: toolName, decision: "error", outcome: "unreachable", wait_ms: 0, via: "pipe", ...match });
+      return { ok: true, text: JSON.stringify({ behavior: "deny", message: "approval endpoint unreachable: no app configured (BRAIN_APP_URL)" }) };
+    }
     const title = match ? tr("{0}: {1} — {2}", WORKER_NAME, toolName, tr(match.label)) : `${WORKER_NAME}: ${toolName}`;
-    const { decision } = await askApproval({ baseUrl: APP_URL, token: APP_TOKEN }, title, detail, "claude-code");
-    logEvent({ type: "approval_decision", tool: toolName, decision, via: "pipe", ...match });
+    const { decision, outcome } = await approvalWaits.ask({ baseUrl: APP_URL, token: APP_TOKEN, signal,
+      onEnd: (event) => logEvent({ ...event, tool: toolName, via: "pipe", ...match }),
+    }, title, detail, "claude-code");
     return {
       ok: true,
       text: decision === "allow"
         ? JSON.stringify({ behavior: "allow", updatedInput: args?.input ?? {} })
-        : JSON.stringify({ behavior: "deny", message: `${USER_NAME} did not approve (${decision})` }),
+        : JSON.stringify({ behavior: "deny", message: approvalFailure(outcome) }),
     };
   }
   return { ok: false, error: `unknown tool: ${name}` };
@@ -4989,11 +5018,12 @@ async function main(): Promise<void> {
   if (CONTROL_TOKEN) {
     startAuthenticatedControlEndpoint({
       token: CONTROL_TOKEN, port: CONTROL_PORT,
-      handle: (name, args) => handleControlTool(state, name, args),
+      handle: (name, args, signal) => handleControlTool(state, name, args, signal),
       serve: (options) => Bun.serve(options as any),
       log: logEvent,
       tools: ["pins", "pin", "unpin", "status", "effort", "approve", "approval_settings_check", "web_search", "web_fetch"],
       heads: (refresh) => loadHeadsSnapshot(state, refresh),
+      limits: () => LIMITS.snapshot(ACCOUNT.name()),
     });
   }
 

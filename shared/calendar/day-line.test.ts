@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { composeDayLines, dueForSession, runDayLine } from "./day-line";
 import { contextLine, foreignContext } from "../scripts/context-text";
-import type { CalendarEntry } from "./store";
+import { validateNewEntries, writeEntries, type CalendarEntry } from "./store";
 
 const SHARED = join(import.meta.dir, "..");
 const REPO = join(SHARED, "..");
@@ -19,6 +19,22 @@ function tmp(prefix: string): string {
 }
 
 const e = (p: Partial<CalendarEntry>): CalendarEntry => ({ id: crypto.randomUUID(), title: "x", date: "2026-09-28", time: null, note: null, created: "", ...p });
+
+test("the day line reads expanded public and private series as ordinary entries", () => {
+  const home = tmp("cal-series-day-");
+  const data = join(home, "data");
+  const schedule = { date: "2026-09-28", repeat_weekdays: ["mo", "th"], repeat_until: "2026-10-08", except_dates: ["2026-10-01"] };
+  const entries = [
+    ...validateNewEntries({ ...schedule, title: "Practice", time: "17:30", end: "18:30" }).entries!,
+    ...validateNewEntries({ ...schedule, title: "Private plan", private: true }).entries!,
+  ];
+  writeEntries(join(data, "calendar.json"), entries);
+  const env = { EMBERVY_HOME: home, EMBERVY_TIMEZONE: "Europe/Berlin", EMBERVY_HOOK_CALENDAR: "1" };
+  const args = ["series-session", "--data-dir", data];
+  expect(runDayLine(args, env, Date.UTC(2026, 8, 28, 10))).toBe("📅 Your calendar today (Monday 2026-09-28): all day Private plan · 17:30–18:30 Practice");
+  expect(runDayLine(args, env, Date.UTC(2026, 9, 1, 10))).toContain("nothing entered");
+  expect(runDayLine(args, env, Date.UTC(2026, 9, 5, 10))).toContain("all day Private plan · 17:30–18:30 Practice");
+});
 
 describe("composeDayLines", () => {
   test("agent line: all-day first, then by time, ranges shown", () => {

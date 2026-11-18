@@ -1895,7 +1895,15 @@ async function toolWake(env: Env) {
 }
 
 async function toolHealth(env: Env) {
-  const [hotCount, archCount, openCount, daemonRow, dreamRow, daemonModeRow] = await Promise.all([
+  // Older houses may not have applied the additive dream-runs migration yet.
+  // Keep all pre-existing health fields available even if this optional read fails.
+  const dreamAttempt = async () => {
+    try {
+      return await env.DB.prepare(`SELECT started_at, result, error_code, error_status FROM dream_runs ORDER BY started_at DESC, id DESC LIMIT 1`)
+        .first<{ started_at: string; result: string; error_code: string | null; error_status: number | null }>();
+    } catch { return null; }
+  };
+  const [hotCount, archCount, openCount, daemonRow, dreamRow, daemonModeRow, dreamAttemptRow] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS n FROM events_hot`).first<{ n: number }>(),
     env.DB.prepare(`SELECT COUNT(*) AS n FROM events_archive`).first<{ n: number }>(),
     env.DB.prepare(
@@ -1908,6 +1916,7 @@ async function toolHealth(env: Env) {
       `SELECT created_at FROM dream_notes ORDER BY created_at DESC LIMIT 1`,
     ).first<{ created_at: string }>(),
     env.DB.prepare(`SELECT mode, backlog_cursor FROM daemon_config WHERE id = 1`).first<{ mode: string; backlog_cursor: number }>(),
+    dreamAttempt(),
   ]);
 
   const warnings: string[] = [];
@@ -1922,6 +1931,10 @@ async function toolHealth(env: Env) {
     daemon_last_run: daemonRow?.started_at ?? null,
     daemon_last_ok: daemonRow?.ok === 1,
     dream_last_run: dreamRow?.created_at ?? null,
+    dream_last_attempt: dreamAttemptRow?.started_at ?? null,
+    dream_last_result: dreamAttemptRow?.result ?? null,
+    dream_last_error: dreamAttemptRow?.error_code
+      ? { class: dreamAttemptRow.error_code, status: dreamAttemptRow.error_status ?? null } : null,
     daemon_mode: daemonModeRow?.mode ?? "normal",
     backlog_cursor: daemonModeRow?.backlog_cursor ?? 0,
     warnings,
@@ -1935,6 +1948,7 @@ async function toolHealth(env: Env) {
     `Daemon last run: ${out.daemon_last_run ?? "never"} (${out.daemon_last_ok ? "ok" : "failed"})`,
     `Daemon mode: ${out.daemon_mode} (backlog cursor=${out.backlog_cursor})`,
     `Dream last run: ${out.dream_last_run ?? "never"}`,
+    `Dream last attempt: ${out.dream_last_attempt ?? "never"} (${out.dream_last_result ?? "unknown"})${out.dream_last_error ? ` — ${out.dream_last_error.class}${out.dream_last_error.status === null ? "" : ` (HTTP ${out.dream_last_error.status})`}` : ""}`,
     warnings.length ? `Warnings:\n${warnings.map((w) => "- " + w).join("\n")}` : "No warnings",
   ];
 

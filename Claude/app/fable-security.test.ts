@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, timingSafeEqual } from "node:crypto";
+import "./terminal-card.test";
 
 const server = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
 const app = readFileSync(join(import.meta.dir, "public/app.js"), "utf8");

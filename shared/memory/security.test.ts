@@ -137,7 +137,13 @@ test("MCP health requires the bearer token and retains detail", async () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "health", arguments: {} } }),
     }), env);
     expect(response.status).toBe(authorized ? 200 : 401);
-    expect(reads).toBe(authorized ? 6 : 0);
-    if (authorized) expect(await response.text()).toContain("hot_count");
+    expect(reads).toBe(authorized ? 7 : 0);
+    if (authorized) {
+      const text = await response.text();
+      expect(text).toContain("hot_count");
+      expect(text).toContain("dream_last_attempt");
+      expect(text).toContain("dream_last_result");
+      expect(text).toContain("dream_last_error");
+    }
   }
 });

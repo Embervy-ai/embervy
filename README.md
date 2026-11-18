@@ -139,6 +139,12 @@ Embervy ships in two layers — keep them together:
   UserPromptSubmit hook + watchdog + cut/respawn loop, plus
   `CLAUDE.md.example`. GLM, Kimi and MiniMax are wired here too (same
   Claude Code binary, different endpoint); Claude Code still needs a Claude sign-in for the app channel.
+  Kimi defaults to `kimi-for-coding` with a 1,048,576-token window. Set
+  `EMBERVY_KIMI_MODEL` to choose another model (default window: 262,144), or
+  `EMBERVY_KIMI_CONTEXT` to override the window with a decimal integer from
+  1,024 to 10,000,000 (no leading zeroes). Invalid values are logged and fall
+  back to the model's default. See [Kimi configuration](INSTALL.md#kimi-on-claude-code)
+  for threshold overrides.
 
 `shared/` is substrate-agnostic by design. Both paths use the same
 memory core; only the binding layer differs.
@@ -401,7 +407,11 @@ came first and carried our houses for months before Brain.
    `shared/tools/chatgpt-oauth-adapter.ts` lets Brain **and** Claude
    Code think on a ChatGPT subscription, with a prompt cache that holds
    and working web search (see `shared/tools/CHATGPT-ADAPTER.md`); Claude Code still needs a Claude sign-in for the app channel.
-2. **The Claude Code path.** *(done, in `Claude/`)*
+2. **The Claude Code path.** *(done, in `Claude/`)* The optional
+   [statusline observer](docs/cache-ping.md#statusline-observations) saves Claude
+   Code's reported quota windows for the cache-ping guard and the signed-in
+   app route `/api/claude-limits`. Setup preserves a house's own statusline;
+   figures are only as fresh as its last update, with no subscription polling.
 3. **Full support for GLM, Kimi, MiniMax and Grok.** GLM and Kimi run
    under Brain in our own houses; the installer offers Claude Code with Claude, and other heads can be connected afterwards while keeping the Claude sign-in for the app channel. MiniMax (Claude Code path) and Grok
    (Brain) are wired but have not run in a real house yet; until they

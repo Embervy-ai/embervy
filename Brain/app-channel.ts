@@ -359,50 +359,143 @@ export async function appBroadcast(opts: AppClientOptions, text: string, type: "
   }
 }
 
+export const APPROVAL_LIFETIME_MS = 1_800_000;
 export type ApprovalDecision = "allow" | "deny" | "expired" | "error";
+export type ApprovalOutcome = "allow" | "deny" | "expired" | "unreachable" | "invalid" | "disconnected" | "shutdown";
+export interface ApprovalResult { decision: ApprovalDecision; id: string | null; outcome: ApprovalOutcome }
+export interface ApprovalOptions extends AppClientOptions {
+  pollMs?: number;
+  timeoutMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
+  onEnd?: (event: Record<string, unknown>) => void;
+}
+
+export function approvalFailure(outcome: ApprovalOutcome): string {
+  switch (outcome) {
+    case "unreachable": return "approval endpoint unreachable";
+    case "expired": return "no approval response within the card deadline";
+    case "invalid": return "invalid approval response";
+    case "shutdown": return "approval wait ended: Brain shutting down; no approval received";
+    case "disconnected": return "approval connection lost while waiting; no approval received";
+    default: return "approval denied";
+  }
+}
+
+function approvalPause(ms: number, signal?: AbortSignal, sleep?: (ms: number) => Promise<void>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: unknown) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      error ? reject(error) : resolve();
+    };
+    const abort = () => finish(new Error("approval wait cancelled"));
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener("abort", abort, { once: true });
+    if (sleep) sleep(ms).then(() => finish(), finish);
+    else timer = setTimeout(finish, ms);
+  });
+}
 
 export async function askApproval(
-  opts: AppClientOptions & { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> },
+  opts: ApprovalOptions,
   title: string,
   detail: string,
   kind = "brain",
-): Promise<{ decision: ApprovalDecision; id: string | null }> {
+): Promise<ApprovalResult> {
   const doFetch = opts.fetchImpl ?? fetch;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = opts.now ?? Date.now;
+  const started = now();
   const base = opts.baseUrl.replace(/\/$/, "");
   let id: string | null = null;
-  try {
-    const response = await doFetch(`${base}/api/approval/ask`, {
-      method: "POST", headers: authHeaders(opts.token),
-      body: JSON.stringify({ title, detail, kind }),
-      signal: AbortSignal.timeout(10_000),
-    });
+  let deadline = started + (opts.timeoutMs ?? APPROVAL_LIFETIME_MS);
+  const cancelled = (): ApprovalOutcome => opts.signal?.reason === "shutdown" ? "shutdown" : "disconnected";
+  const cardDeadline = (data: any) => {
+    const raw = data?.expiresAt ?? data?.expires_at;
+    if (raw === undefined) return;
+    const value = typeof raw === "number" ? raw : Date.parse(raw);
+    if (Number.isFinite(value)) deadline = opts.timeoutMs === undefined ? value : Math.min(deadline, value);
+  };
+  const wait = async (): Promise<ApprovalOutcome> => {
+    if (opts.signal?.aborted) return cancelled();
+    let response: Response;
+    try {
+      // Finish creation even after caller cancellation so a returned card can be closed.
+      response = await doFetch(`${base}/api/approval/ask`, {
+        method: "POST", headers: authHeaders(opts.token),
+        body: JSON.stringify({ title, detail, kind }),
+        signal: AbortSignal.timeout(10_000), timeout: false,
+      });
+    } catch { return "unreachable"; }
     const data: any = await response.json().catch(() => null);
     id = typeof data?.id === "string" || typeof data?.id === "number" ? String(data.id) : null;
-  } catch {
-    id = null;
-  }
-  if (!id) return { decision: "error", id: null };
-  const pollMs = opts.pollMs ?? 3000;
-  const deadline = Date.now() + (opts.timeoutMs ?? 1_740_000);
-  while (Date.now() < deadline) {
-    await sleep(pollMs);
-    try {
-      const response = await doFetch(`${base}/api/approval/${encodeURIComponent(id)}`, { headers: authHeaders(opts.token), signal: AbortSignal.timeout(10_000) });
-      const data: any = await response.json().catch(() => null);
-      const decision = String(data?.decision ?? data?.status ?? "").toLowerCase();
-      if (decision === "allow" || decision === "approved" || decision === "yes") return { decision: "allow", id };
-      if (decision === "deny" || decision === "denied" || decision === "no") return { decision: "deny", id };
-      if (decision === "expired") return { decision: "expired", id };
-    } catch {
-      // A failed poll is not an approval decision.
+    if (!response.ok || !id) return "invalid";
+    cardDeadline(data);
+    while (now() < deadline) {
+      if (opts.signal?.aborted) return cancelled();
+      try {
+        await approvalPause(Math.min(opts.pollMs ?? 3000, deadline - now()), opts.signal, opts.sleep);
+        if (now() >= deadline) return "expired";
+        const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(10_000, deadline - now()))));
+        const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+        const response = await doFetch(`${base}/api/approval/${encodeURIComponent(id)}`, {
+          headers: authHeaders(opts.token), signal, timeout: false,
+        });
+        const data: any = await response.json().catch(() => null);
+        if (opts.signal?.aborted) return cancelled();
+        // A poll the app could not answer is not a decision: the app may be restarting while the card waits.
+        if (!response.ok || !data) continue;
+        cardDeadline(data);
+        if (now() >= deadline) return "expired";
+        const decision = String(data.decision ?? data.status ?? "").toLowerCase();
+        if (["allow", "approved", "yes"].includes(decision)) return "allow";
+        if (["deny", "denied", "no"].includes(decision)) return "deny";
+        if (decision === "expired") return "expired";
+        if (decision !== "pending") return "invalid";
+      } catch {
+        if (opts.signal?.aborted) return cancelled();
+        // A failed poll is not an approval decision; the card stays valid until its deadline.
+        if (now() >= deadline) return "expired";
+      }
+    }
+    return opts.signal?.aborted ? cancelled() : "expired";
+  };
+  const outcome = await wait();
+  const waitMs = Math.max(0, now() - started);
+  let closure = "not_needed";
+  if (id && outcome !== "allow" && outcome !== "deny") {
+    closure = "failed";
+    // Cancellation must not abort the independent, bounded card cleanup request.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await doFetch(`${base}/api/approval/${encodeURIComponent(id)}/decide`, {
+          method: "POST", headers: authHeaders(opts.token), body: JSON.stringify({ decision: "expired" }),
+          signal: AbortSignal.timeout(10_000), timeout: false,
+        });
+        if (response.ok) { closure = "expired"; break; }
+      } catch { /* A second attempt can survive a transient connection loss. */ }
     }
   }
-  try {
-    await doFetch(`${base}/api/approval/${encodeURIComponent(id)}/decide`, {
-      method: "POST", headers: authHeaders(opts.token), body: JSON.stringify({ decision: "expired" }),
-      signal: AbortSignal.timeout(10_000),
-    });
-  } catch { /* best effort */ }
-  return { decision: "expired", id };
+  const decision: ApprovalDecision = outcome === "allow" || outcome === "deny" || outcome === "expired" ? outcome : "error";
+  opts.onEnd?.({ type: "approval_decision", decision, outcome, wait_ms: waitMs, card_id: id, closure });
+  return { decision, id, outcome };
+}
+
+/** Keep shutdown alive until pending cards have been closed and their outcomes logged. */
+export class ApprovalWaits {
+  private controller = new AbortController();
+  private pending = new Set<Promise<ApprovalResult>>();
+  ask(opts: ApprovalOptions, title: string, detail: string, kind = "brain"): Promise<ApprovalResult> {
+    const signal = opts.signal ? AbortSignal.any([opts.signal, this.controller.signal]) : this.controller.signal;
+    const promise = askApproval({ ...opts, signal }, title, detail, kind);
+    this.pending.add(promise);
+    void promise.finally(() => this.pending.delete(promise)).catch(() => {});
+    return promise;
+  }
+  async stop(): Promise<void> {
+    this.controller.abort("shutdown");
+    await Promise.allSettled([...this.pending]);
+  }
 }

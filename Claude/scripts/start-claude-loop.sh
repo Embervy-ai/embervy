@@ -144,12 +144,112 @@ notify_runtime_swap() {
   text=$(printf 'Runtime restarted.\nReason: %s\nBuild: %s\nEffort: %s\nMCPs: %s' \
     "$reason" "$build" "$effort" "$mcps")
 
-  embervy_curl_bearer "${INTERNAL_API_TOKEN:-}" -s --max-time 5 -X POST "http://${APP_HOST}:${APP_PORT}/api/internal/broadcast" \
-    -H "Content-Type: application/json" \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"role":"system","text":sys.argv[1],"ts":sys.argv[2]}))' "$text" "$(date -Iseconds)")" \
-    >> "$LOG" 2>&1 \
-    && echo "$(date -Iseconds) loop: notify_runtime_swap fired (rc=$rc)" >> "$LOG" \
-    || echo "$(date -Iseconds) loop: notify_runtime_swap curl failed" >> "$LOG"
+  # Both the body and bearer travel through pipes, never process arguments.
+  # A stable id lets the app acknowledge retries without storing a second message.
+  if (
+    set -o pipefail
+    printf '%s\0%s\0%s\0' "$text" "${2:-$(date -Iseconds)}" "${3:-}" |
+      python3 -c 'import json,sys; text,ts,id,_=sys.stdin.read().split("\0"); print(json.dumps(dict(role="system",text=text,ts=ts,**({"id":id} if id else {}))))' |
+      embervy_curl_bearer "${INTERNAL_API_TOKEN:-}" -fsS --max-time 3 -X POST "http://${APP_HOST}:${APP_PORT}/api/internal/broadcast" \
+        -H "Content-Type: application/json" -d @-
+  ) >> "$LOG" 2>&1; then
+    echo "$(date -Iseconds) loop: notify_runtime_swap fired (rc=$rc)" >> "$LOG"
+  else
+    echo "$(date -Iseconds) loop: notify_runtime_swap curl failed" >> "$LOG"
+    return 1
+  fi
+}
+
+prune_runtime_swaps() {
+  # File age is independent of delivery attempts, so retries cannot extend retention.
+  python3 - "$EMBERVY_HOME/state/restart-notices" <<'PY' >> "$LOG" 2>&1
+import datetime, sys, time
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+if not directory.exists():
+    sys.exit(0)
+if directory.is_symlink():
+    sys.exit(1)
+now = time.time()
+records = sorted((p.stat().st_mtime, p.name, p) for p in directory.glob('*.pending')
+                 if not p.is_symlink() and p.is_file())
+
+def discard(path, reason):
+    path.unlink()
+    print(f'{datetime.datetime.now().astimezone().isoformat()} loop: discarded restart notice {path.name} ({reason})')
+
+live = []
+for modified, name, path in records:
+    if now - modified > 86400:
+        discard(path, 'older than one day')
+    else:
+        live.append(path)
+for path in live[:-10]:
+    discard(path, 'queue limit of ten')
+PY
+}
+
+queue_runtime_swap() {
+  local directory="$EMBERVY_HOME/state/restart-notices" pending
+  RESTART_PAUSE_NOTICE=""
+  # Atomic publication leaves either a complete private record or no pending event.
+  [ ! -L "$directory" ] || return 1
+  ( umask 077; mkdir -p "$directory" && chmod 700 "$directory" ) || return 1
+  pending=$(mktemp "$directory/$(date +%s%N).XXXXXX") || return 1
+  if ! ( umask 077; printf '%s\0' "$rc" "$(date -Iseconds)" "$MODE" "$POST_EXIT_EXPORTED" "${CRASH_TIMES[*]}" > "$pending" ) \
+    || ! mv -- "$pending" "$pending.pending"; then
+    rm -f -- "$pending"
+    return 1
+  fi
+  RESTART_PAUSE_NOTICE="$pending.pending"
+  # A published event must not also take the direct-send fallback if cleanup fails.
+  prune_runtime_swaps || echo "$(date -Iseconds) loop: restart notice cleanup failed" >> "$LOG"
+}
+
+drain_runtime_swaps() {
+  local pending fields rc POST_EXIT_EXPORTED pause_notice="${RESTART_PAUSE_NOTICE:-}"
+  RESTART_PAUSE_NOTICE=""
+  prune_runtime_swaps || { echo "$(date -Iseconds) loop: restart notice cleanup failed" >> "$LOG"; return 1; }
+  for pending in "$EMBERVY_HOME/state/restart-notices/"*.pending; do
+    [ -f "$pending" ] && [ ! -L "$pending" ] || continue
+    fields=()
+    mapfile -d '' -t fields < "$pending"
+    if [ "${#fields[@]}" -ne 5 ]; then
+      echo "$(date -Iseconds) loop: discarded invalid restart notice ${pending##*/}" >> "$LOG"
+      rm -- "$pending"
+      return
+    fi
+    # Delivery never restores stale session state or repeats a predecessor's pause.
+    rc="${fields[0]}"
+    POST_EXIT_EXPORTED="${fields[3]}"
+    # Remove only after acknowledgement; a death before removal retries the same id.
+    notify_runtime_swap "$rc" "${fields[1]}" "claude-restart-${pending##*/}" || return 1
+    rm -- "$pending" || return 1
+    if [ "$pending" = "$pause_notice" ]; then
+      loop_restart_pause "$rc" "$POST_EXIT_EXPORTED"
+    fi
+    # One request per head bounds startup latency even with a full backlog.
+    return 0
+  done
+}
+
+reload_loop_if_needed() {
+  local current_hash marker="$EMBERVY_HOME/state/loop_reload"
+  current_hash="$(md5sum "$0" 2>/dev/null)"
+  current_hash="${current_hash%% *}"
+  if [ -f "$marker" ] || { [ -n "$LOOP_SELF_HASH" ] && [ -n "$current_hash" ] && [ "$current_hash" != "$LOOP_SELF_HASH" ]; }; then
+    # An invalid replacement leaves the old code running, so its notice is accurate.
+    if bash -n "$0" 2>>"$LOG"; then
+      echo "$(date -Iseconds) loop: SELF-RELOAD — script or reload marker changed, exec'ing fresh version" >> "$LOG"
+      rm -f -- "$marker"
+      LOOP_RESUME_MODE="$MODE" LOOP_RESUME_CRASH_TIMES="${CRASH_TIMES[*]}" \
+        LOOP_RESTART_PAUSE_NOTICE="${RESTART_PAUSE_NOTICE:-}" exec bash "$0" ${PASS_ARGS[@]+"${PASS_ARGS[@]}"}
+      return 1
+    else
+      echo "$(date -Iseconds) loop: SELF-RELOAD SKIPPED — new version has syntax errors, keeping old" >> "$LOG"
+    fi
+  fi
 }
 
 loop_restart_pause() {
@@ -175,16 +275,21 @@ for arg in "$@"; do
 done
 MODE="$INITIAL_MODE"
 
-# Reloading the loop must preserve whether the next session resumes or starts fresh.
-if [ -n "${LOOP_RESUME_MODE:-}" ]; then
-  MODE="$LOOP_RESUME_MODE"
-  echo "$(date -Iseconds) loop: self-reload resumed (mode=$MODE)" >> "$LOG"
-  unset LOOP_RESUME_MODE
-fi
+restore_loop_restart_state() {
+  # Session control survives exec independently of optional delivery records.
+  CRASH_TIMES=()
+  RESTART_PAUSE_NOTICE="${LOOP_RESTART_PAUSE_NOTICE:-}"
+  if [ -n "${LOOP_RESUME_MODE:-}" ]; then
+    MODE="$LOOP_RESUME_MODE"
+    read -r -a CRASH_TIMES <<< "${LOOP_RESUME_CRASH_TIMES:-}"
+    echo "$(date -Iseconds) loop: self-reload resumed (mode=$MODE)" >> "$LOG"
+  fi
+  unset LOOP_RESUME_MODE LOOP_RESUME_CRASH_TIMES LOOP_RESTART_PAUSE_NOTICE
+}
+restore_loop_restart_state
 
-LOOP_SELF_HASH="$(md5sum "$0" 2>/dev/null | awk '{print $1}')"
-
-CRASH_TIMES=()
+LOOP_SELF_HASH="$(md5sum "$0" 2>/dev/null)"
+LOOP_SELF_HASH="${LOOP_SELF_HASH%% *}"
 
 # Compaction is the user's choice in the installer (default off): then the
 # watchdog cuts near the limit and the bridge carries the last turns verbatim.
@@ -203,6 +308,9 @@ export CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE=950000
 # Prompt suggestions can auto-submit invented user prompts; this variable is
 # checked before the remote flag and cannot be overridden by it.
 export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+
+# App replies own delivery; only an unset value gets the quiet default.
+export CLAUDE_CODE_SILENT_TURN_REMINDER="${CLAUDE_CODE_SILENT_TURN_REMINDER-0}"
 
 # MCP subprocesses need the app's tokens. The .env is read as data, never run.
 embervy_env_load -x "$EMBERVY_HOME/Claude/app/.env"
@@ -245,14 +353,29 @@ case "${EMBERVY_BACKEND:-claude}" in
       export ANTHROPIC_AUTH_TOKEN="$KIMI_CODE_KEY"
       unset ANTHROPIC_API_KEY
       export API_TIMEOUT_MS="3000000"
-      # A smaller model window needs lower watchdog thresholds or it reaches its hard limit before a cut.
-      export CLAUDE_CODE_MAX_CONTEXT_TOKENS=256000
-      export CLAUDE_CODE_AUTO_COMPACT_WINDOW=262144
-      export WATCHDOG_WARN_TOKENS="${WATCHDOG_WARN_TOKENS_KIMI:-180000}"
-      export WATCHDOG_CUT_TOKENS="${WATCHDOG_CUT_TOKENS_KIMI:-210000}"
+      KIMI_MODEL="${EMBERVY_KIMI_MODEL:-kimi-for-coding}"
+      KIMI_WINDOW=262144
+      [ "$KIMI_MODEL" = kimi-for-coding ] && KIMI_WINDOW=1048576
+      # Validate before arithmetic: bound both digit count and capacity, rejecting
+      # expressions, leading zeroes and oversized integers without evaluating them.
+      if [ "${EMBERVY_KIMI_CONTEXT+x}" = x ]; then
+        if [[ "$EMBERVY_KIMI_CONTEXT" =~ ^[1-9][0-9]{0,7}$ ]] \
+          && (( EMBERVY_KIMI_CONTEXT >= 1024 && EMBERVY_KIMI_CONTEXT <= 10000000 )); then
+          KIMI_WINDOW="$EMBERVY_KIMI_CONTEXT"
+        else
+          echo "$(date -Iseconds) loop: invalid EMBERVY_KIMI_CONTEXT (expected integer 1024..10000000, no leading zeroes) — using model default ${KIMI_WINDOW}-token window" >> "$LOG"
+        fi
+      fi
+      export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$KIMI_WINDOW"
+      export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$KIMI_WINDOW"
+      # Keep the CLI's blocking limit beyond the default cut, also for overrides.
+      export CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE="$(( KIMI_WINDOW * 95 / 100 ))"
+      # Preserve the old 180k/210k policy at 262144 tokens; scale with capacity.
+      export WATCHDOG_WARN_TOKENS="${WATCHDOG_WARN_TOKENS_KIMI:-$(( KIMI_WINDOW * 180000 / 262144 ))}"
+      export WATCHDOG_CUT_TOKENS="${WATCHDOG_CUT_TOKENS_KIMI:-$(( KIMI_WINDOW * 210000 / 262144 ))}"
       RUNNING_ENGINE=kimi; ENGINE_WINDOW=own
-      BACKEND_MODEL_ARGS=(--model "${EMBERVY_KIMI_MODEL:-kimi-k2.7-code}")
-      echo "$(date -Iseconds) loop: engine Kimi (${EMBERVY_KIMI_MODEL:-kimi-k2.7-code}, kimi.com/coding, 256K window)" >> "$LOG"
+      BACKEND_MODEL_ARGS=(--model "$KIMI_MODEL")
+      echo "$(date -Iseconds) loop: engine Kimi (${KIMI_MODEL}, kimi.com/coding, ${KIMI_WINDOW}-token window)" >> "$LOG"
     else
       echo "$(date -Iseconds) loop: EMBERVY_BACKEND=kimi but KIMI_CODE_KEY missing — falling back to claude" >> "$LOG"
     fi
@@ -405,16 +528,9 @@ for c in "${_CHANS[@]}"; do
 done
 
 while true; do
-  # Keep the running loop if a script edit fails syntax validation.
-  __self_hash="$(md5sum "$0" 2>/dev/null | awk '{print $1}')"
-  if [ -n "$LOOP_SELF_HASH" ] && [ -n "$__self_hash" ] && [ "$__self_hash" != "$LOOP_SELF_HASH" ]; then
-    if bash -n "$0" 2>>"$LOG"; then
-      echo "$(date -Iseconds) loop: SELF-RELOAD — script changed, exec'ing fresh version" >> "$LOG"
-      LOOP_RESUME_MODE="$MODE" exec bash "$0" ${PASS_ARGS[@]+"${PASS_ARGS[@]}"}
-    else
-      echo "$(date -Iseconds) loop: SELF-RELOAD SKIPPED — new version has syntax errors, keeping old" >> "$LOG"
-    fi
-  fi
+  # No successor facts are emitted until the code that will launch it is loaded.
+  reload_loop_if_needed || { sleep 2; continue; }
+  drain_runtime_swaps || true
 
   echo "$(date -Iseconds) loop: starting claude (mode=$MODE iter=$LOOP_ITER)" >> "$LOG"
   LOOP_ITER=$((LOOP_ITER + 1))
@@ -549,13 +665,9 @@ except OSError as error:
     fi
   fi
 
-  notify_runtime_swap "$rc"
-
-  loop_restart_pause "$rc" "$POST_EXIT_EXPORTED"
-
-  if [ -f "$EMBERVY_HOME/state/loop_reload" ]; then
-    rm -f "$EMBERVY_HOME/state/loop_reload"
-    echo "$(date -Iseconds) loop: reload marker found — re-execing self" >> "$LOG"
-    exec "$0" "$@"
+  # Optional delivery must never prevent the next session from starting.
+  if ! queue_runtime_swap; then
+    echo "$(date -Iseconds) loop: cannot persist restart notice — trying direct delivery once" >> "$LOG"
+    notify_runtime_swap "$rc" || true
   fi
 done

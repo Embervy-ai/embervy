@@ -62,6 +62,7 @@ export interface PipeOptions {
   logEvent?: (e: any) => void;
   onSelfTurn?: (event: SelfTurnEvent) => void;
   onUsage?: (sample: PipeUsageSample) => void;
+  onLimits?: (info: unknown, model: string) => void;
   onLiveTokens?: (snapshot: LiveTokensSnapshot) => void;
   onToolUse?: (tool: { id?: string; name: string; input: unknown }) => void;
   onHelperActivity?: (event: HelperActivity) => void;
@@ -823,6 +824,7 @@ export class ClaudePipe {
   private subagentTasks = new Set<string>();
   private pendingNotices: string[] = [];
   private pendingRateLimit: any = null;
+  private lastLimitsModel: string | undefined;
   private stderrAuthFailure = false;
   private pendingWakePrompt: string | null = null;
   private resultsSeen = 0;
@@ -895,6 +897,9 @@ export class ClaudePipe {
         birthEnv.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE ?? "950000",
       CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING:
         birthEnv.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING ?? "1",
+      // App replies own delivery; preserve even an explicitly empty house value.
+      CLAUDE_CODE_SILENT_TURN_REMINDER:
+        birthEnv.CLAUDE_CODE_SILENT_TURN_REMINDER ?? "0",
       ...(typeof this.opts.maxOutputTokens === "number"
         ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(this.opts.maxOutputTokens) }
         : {}),
@@ -1210,6 +1215,15 @@ export class ClaudePipe {
 
   private route(evt: any): void {
     if (!evt || typeof evt !== "object") return;
+    if (evt.type === "rate_limit_event") {
+      // Optional subscription telemetry must never interfere with turn settlement.
+      try {
+        const info = evt.rate_limit_info;
+        this.opts.onLimits?.({ unifiedWindows: info?.unifiedWindows, isUsingOverage: info?.isUsingOverage,
+          overageStatus: info?.overageStatus, overageDisabledReason: info?.overageDisabledReason },
+          this.openTurn ? this.openTurn.acc.servedModel ?? this.opts.model : this.lastLimitsModel ?? this.opts.model);
+      } catch { /* The existing rate-limit and error paths remain authoritative. */ }
+    }
     // Helpers have separate contexts and must not contribute to the resident's transcript.
     const parent = evt.parent_tool_use_id;
     if (typeof parent === "string" && parent.length > 0) {
@@ -1511,6 +1525,7 @@ export class ClaudePipe {
       result.finalText = note;
       result.assistantText = note;
     }
+    this.lastLimitsModel = result.servedModel ?? this.opts.model;
     this.openTurn = null;
     this.emitLive();
     this.resultsSeen += 1;
@@ -1546,11 +1561,25 @@ export class ClaudePipe {
       (result.rateLimitInfo?.status !== "rejected" && claudeAuthExpired(this.opts.authProfile, failureText, code))));
     // An intentional budget interrupt is an orderly turn boundary, even if the CLI reports an error.
     const isError = cliError && (turn.hopLimit === null || auth || result.rateLimitInfo?.status === "rejected");
+    let errorFields: { subtype: string | null; status_code: number | string | null; error: string } | undefined;
+    if (isError) {
+      const subtype = typeof evt.subtype === "string" ? evt.subtype : null;
+      const statusCode = (typeof code === "number" && Number.isFinite(code)) || (typeof code === "string" && code.length <= 100) ? code : null;
+      const details = [subtype ? `subtype ${subtype}` : "", statusCode !== null ? `status ${statusCode}` : ""].filter(Boolean);
+      const text = failureText || `no error text from the CLI${details.length ? ` (${details.join(", ")})` : ""}`;
+      // Keep routing decisions independent of redaction and share one bounded diagnosis with both owners.
+      errorFields = {
+        subtype: subtype === null ? null : this.opts.toolRecords!.diagnostic(subtype),
+        status_code: statusCode === null ? null : this.opts.toolRecords!.diagnostic(statusCode),
+        // An expired sign-in keeps its fixed wording; the CLI's own sentence about it never reaches a log.
+        error: auth ? "Claude sign-in expired" : this.opts.toolRecords!.diagnostic(text).slice(0, 600),
+      };
+    }
     if (owner && owner.kind === "send") {
       if (this.activeSend === owner) this.activeSend = null;
-      this.opts.logEvent?.({ type: "claude_pipe_turn_end", turn: turn.seq, owner: "brain", result_index: result.resultIndex, origin: originKind, is_error: isError });
+      this.opts.logEvent?.({ type: "claude_pipe_turn_end", turn: turn.seq, owner: "brain", result_index: result.resultIndex, origin: originKind, is_error: isError, ...errorFields });
       if (isError) {
-        owner.reject?.(auth ? new ClaudeAuthExpiredError() : Object.assign(new Error(`claude -p reported is_error=true: ${this.opts.toolRecords!.diagnostic(resultText.slice(0, 300))}`), { rateLimitInfo: result.rateLimitInfo ?? null }));
+        owner.reject?.(auth ? new ClaudeAuthExpiredError() : Object.assign(new Error(`claude -p reported is_error=true: ${errorFields!.error}`), { rateLimitInfo: result.rateLimitInfo ?? null }));
       }
       else owner.resolve?.(result);
       if (turn.announced) {
@@ -1560,11 +1589,11 @@ export class ClaudePipe {
       const kind = this.selfKind(turn, originKind);
       const wakePrompt = kind === "wake" ? this.pendingWakePrompt : null;
       if (kind === "wake") this.pendingWakePrompt = null;
-      this.opts.logEvent?.({ type: "claude_pipe_turn_end", turn: turn.seq, owner: "self", kind, result_index: result.resultIndex, origin: originKind, is_error: isError, unmatched_replays: turn.unmatchedReplays });
+      this.opts.logEvent?.({ type: "claude_pipe_turn_end", turn: turn.seq, owner: "self", kind, result_index: result.resultIndex, origin: originKind, is_error: isError, unmatched_replays: turn.unmatchedReplays, ...errorFields });
       this.emitSelf({
         phase: "end", turn: turn.seq, kind, notices: turn.notices, wakePrompt,
         status: isError ? "error" : "done", authExpired: auth,
-        error: auth ? "Claude sign-in expired" : isError ? this.opts.toolRecords!.diagnostic(resultText.slice(0, 300)) : undefined,
+        error: auth ? "Claude sign-in expired" : errorFields?.error,
         originKind, resultIndex: result.resultIndex ?? null, result, announced: turn.announced,
       });
     }

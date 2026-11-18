@@ -571,10 +571,7 @@ $("house-look-btn")?.addEventListener("click", () => {
   let info;
   try { info = await (await fetch("/api/gpt-model", { credentials: "include" })).json(); } catch { return; }
   if (info && info.substrate === "brain") {
-    section.classList.remove("hidden");
-    const field = section.querySelector(".field");
-    if (field) field.classList.add("hidden");
-    document.getElementById("model-hint").textContent = t("settings.model.brain");
+    section.remove();
     return;
   }
   if (!info || info.substrate !== "gpt") return;

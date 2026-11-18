@@ -286,7 +286,7 @@ describe("Brain house (EMBERVY_HARNESS=brain) — GPT flags set on purpose, the 
     for (const body of [{ model: "glm" }, { model: "kimi" }, { model: "claude" }, { model: "opus" }, { model: "nonsense" }, {}]) {
       const r = await house.post("/api/internal/model", body, true);
       expect([JSON.stringify(body), r.status]).toEqual([JSON.stringify(body), 409]);
-      expect(r.body.error).toBe("The head is chosen inside Brain: send /head or /model in the chat.");
+      expect(r.body.error).toBe("Choose the head, model and thinking level from the Brain menu at the top of the chat.");
     }
     expect((await house.post("/api/internal/model", { model: "opus" }, false)).status).toBe(409);
     expect(existsSync(join(house.dataDir, "current_model"))).toBe(false);

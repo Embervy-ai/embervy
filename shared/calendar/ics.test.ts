@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { escapeText, foldLine, formatUtc, renderFeed, feedEntries } from "./ics";
 import { readCalendar, occurrencesBetween, unfoldLines } from "./ics-reader";
-import type { CalendarEntry } from "./store";
+import { validateNewEntries, type CalendarEntry } from "./store";
 
 const NOW = Date.UTC(2026, 8, 28, 10, 0, 0);
 
@@ -100,6 +100,24 @@ describe("escaping and folding", () => {
     expect(folded[1].startsWith(" ")).toBe(true);
     expect(bytes(folded[1])).toBe(75);
   });
+});
+
+test("an expanded series keeps house-local start and end across both clock changes", () => {
+  const tz = "Europe/Berlin";
+  const entries = validateNewEntries({ title: "Weekly practice", date: "2026-03-22", time: "17:30", end: "18:30",
+    repeat_weekdays: ["su"], repeat_until: "2026-11-01" }).entries!;
+  const privateEntries = validateNewEntries({ title: "Private practice", date: "2026-03-22", time: "17:30",
+    repeat_weekdays: ["su"], repeat_until: "2026-11-01", private: true }).entries!;
+  const feed = renderFeed([...entries, ...privateEntries], { calName: "Calendar", tz, now: NOW });
+  expect(feed).not.toContain("RRULE");
+  expect(feed).not.toContain("Private practice");
+  expect(feed.match(/BEGIN:VEVENT/g)).toHaveLength(entries.length);
+  expect(new Set(feed.split("\r\n").filter((line) => line.startsWith("UID:"))).size).toBe(entries.length);
+  for (const stamp of ["20260322T163000Z", "20260329T153000Z", "20261018T153000Z", "20261025T163000Z"]) {
+    expect(feed).toContain(`DTSTART:${stamp}`);
+  }
+  const occurrences = occurrencesBetween(readCalendar(feed, tz), tz, "2026-03-22", "2026-11-01", "Calendar");
+  expect(occurrences.map((entry) => [entry.date, entry.time, entry.end])).toEqual(entries.map((entry) => [entry.date, "17:30", "18:30"]));
 });
 
 describe("round trip: the reader understands the writer", () => {

@@ -78,6 +78,15 @@ not a task for the user. The worker stores `due_epoch` and exposes:
 - **`mood_state`** (D1, singleton) — inner-weather snapshot, updated
   nightly with two-night smoothing.
 - **`daemon_runs`** (D1) — audit log and run lock of nightly daemon runs.
+- **`dream_runs`** (D1) — bounded-data attempt outcomes for the dream worker,
+  separate from successful notes. `health` exposes the last attempt/result/error
+  alongside the unchanged `dream_last_run`; the doctor explains overdue failures.
+  The dream worker creates the table and index automatically before storing an
+  attempt, including in existing houses; no manual migration is required.
+  The idempotent `migrations/003_dream_runs.sql` migration remains optional.
+  See [the dream worker's attempt trace](dream-worker/README.md#attempt-trace).
+  Worker changes take effect only after deploying the workers, and that deploy
+  requires the human's explicit approval.
 - **`resolution_proposals`** (D1) — resolutions the daemon proposed once;
   applied only when proposed again the next night.
 - **`images_data`** (D1) — base64 image storage; videos go to R2 under
@@ -125,7 +134,7 @@ being lost. Goals and journals never decay.
 `src/daemon.ts` runs nightly (cron 01 UTC by default, run lock 30 min).
 It reads the last seven days, calls an OpenAI-compatible chat endpoint
 (`DAEMON_LLM_URL` / `DAEMON_LLM_MODEL`, default OpenRouter + Mistral
-Medium), validates the JSON, and proposes:
+Medium 3.5), validates the JSON, and proposes:
 
 - **Surfaces** — recurring patterns the agent should see in the morning.
   Template-shaped surfaces ("X in various situations") are rejected.
@@ -181,6 +190,7 @@ was in use.
 | `RAG` (service binding) or `RAG_URL` + `RAG_AUTH_TOKEN` | for recall/scan/trace | The rag worker. |
 | `OPENROUTER_API_KEY` | for the daemon | Key for the default daemon endpoint. |
 | `DAEMON_LLM_URL`, `DAEMON_LLM_MODEL` | no | Any OpenAI-compatible endpoint/model for the daemon. |
+| `DREAM_LLM_MODEL` (dream worker) | no | Another OpenRouter model for the dream. Providers retire models; this replaces the default without a code change. The output budgets (dream 2000, daemon 8000 tokens) suit a model that answers directly; a model that reasons first can use them up before it writes. |
 | `AGENT_NAME` | no | The agent's name — prompt wording and entity on self-generated media. |
 | `TIMEZONE` | no | IANA zone for `wake` display and `due_at` input: the house's zone, the same as `EMBERVY_TIMEZONE` (default `UTC`; the installer sets it). |
 | `PUBLIC_URL` | no | This worker's public URL (used in returned media URLs). |

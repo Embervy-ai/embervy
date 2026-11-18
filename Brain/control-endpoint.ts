@@ -4,16 +4,18 @@ import { tr } from "./texts";
 export interface ControlEndpointDeps {
   token?: string;
   port: number;
-  handle: (name: string, args: unknown) => Promise<{ ok: boolean; text?: string; error?: string }>;
+  handle: (name: string, args: unknown, signal?: AbortSignal) => Promise<{ ok: boolean; text?: string; error?: string }>;
   serve: (options: {
     port: number;
     hostname: string;
+    idleTimeout: number;
     fetch: (request: Request) => Promise<Response>;
   }) => unknown;
   log?: (event: Record<string, unknown>) => void;
   tools?: readonly string[];
   /** GET /heads serves menu choices; refresh=1 bypasses catalog TTLs. Same bearer as /tool. */
   heads?: (refresh: boolean) => unknown | Promise<unknown>;
+  limits?: () => unknown | Promise<unknown>;
 }
 
 function bearerMatches(header: string | null, token: string): boolean {
@@ -51,15 +53,25 @@ export function startAuthenticatedControlEndpoint(deps: ControlEndpointDeps): un
     const server = deps.serve({
       port: deps.port,
       hostname: "127.0.0.1",
+      // Tool deadlines belong to the handler, not to an idle HTTP connection.
+      idleTimeout: 0,
       async fetch(request) {
         const url = new URL(request.url);
         const tool = request.method === "POST" && url.pathname === "/tool";
         const heads = request.method === "GET" && url.pathname === "/heads" && Boolean(deps.heads);
-        if (!tool && !heads) {
+        const limits = request.method === "GET" && url.pathname === "/limits" && Boolean(deps.limits);
+        if (!tool && !heads && !limits) {
           return new Response("not found", { status: 404 });
         }
         if (!bearerMatches(request.headers.get("authorization"), deps.token!)) {
           return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+        }
+        if (limits) {
+          try { return Response.json(await deps.limits!()); }
+          catch (error: any) {
+            deps.log?.({ type: "control_limits_failed", error: String(error?.message ?? error) });
+            return Response.json({ ok: false, error: "limits unavailable" }, { status: 500 });
+          }
         }
         if (heads) {
           try { return Response.json(await deps.heads!(url.searchParams.get("refresh") === "1")); }
@@ -71,11 +83,11 @@ export function startAuthenticatedControlEndpoint(deps: ControlEndpointDeps): un
         let body: any;
         try { body = await request.json(); }
         catch { return Response.json({ ok: false, error: "invalid json" }, { status: 400 }); }
-        const result = await deps.handle(String(body?.name ?? ""), body?.args);
+        const result = await deps.handle(String(body?.name ?? ""), body?.args, request.signal);
         return Response.json(result, { status: result.ok ? 200 : 400 });
       },
     });
-    deps.log?.({ type: "control_server_started", port: deps.port, tools: [...(deps.tools ?? [])], auth: "bearer", ...(deps.heads ? { routes: ["POST /tool", "GET /heads"] } : {}) });
+    deps.log?.({ type: "control_server_started", port: deps.port, tools: [...(deps.tools ?? [])], auth: "bearer", ...(deps.heads || deps.limits ? { routes: ["POST /tool", ...(deps.heads ? ["GET /heads"] : []), ...(deps.limits ? ["GET /limits"] : [])] } : {}) });
     return server;
   } catch (error: any) {
     deps.log?.({ type: "control_server_failed", port: deps.port, error: String(error?.message ?? error) });

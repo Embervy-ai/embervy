@@ -115,7 +115,10 @@ ${shellFunction("notify_runtime_swap")}
 claude() { printf 'test-build\\n'; }
 embervy_curl_bearer() {
   while [ "$#" -gt 0 ]; do
-    if [ "$1" = -d ]; then printf '%s' "$2" > "$HOME/payload.json"; return 0; fi
+    if [ "$1" = -d ]; then
+      if [ "$2" = @- ]; then cat > "$HOME/payload.json"; else printf '%s' "$2" > "$HOME/payload.json"; fi
+      return 0
+    fi
     shift
   done
   return 1

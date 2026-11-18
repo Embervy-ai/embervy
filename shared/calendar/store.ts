@@ -8,12 +8,13 @@
  * entry off the phone feed; the agent itself always sees it.
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { parseDate, parseTime } from "./time";
+import { addDays, parseDate, parseTime, weekdayOf } from "./time";
 
 export interface CalendarEntry {
   id: string;
+  series?: string;
   title: string;
   date: string;
   time: string | null;
@@ -42,12 +43,21 @@ export function readEntries(file: string): CalendarEntry[] {
 /** Atomic write (temp + rename): a crash mid-write never leaves half a file. */
 export function writeJsonAtomic(file: string, data: unknown): void {
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  renameSync(tmp, file);
+  const tmp = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600, flag: "wx" });
+    renameSync(tmp, file);
+  } finally {
+    // Failed staging must not leave partial calendar data beside the live file.
+    rmSync(tmp, { force: true });
+  }
 }
 
 export function writeEntries(file: string, entries: CalendarEntry[]): void {
+  // Preserve existing formatting when a caller saves an unchanged calendar.
+  try {
+    if (JSON.stringify(JSON.parse(readFileSync(file, "utf8"))) === JSON.stringify(entries)) return;
+  } catch {}
   writeJsonAtomic(file, entries);
 }
 
@@ -84,6 +94,51 @@ export function validateNewEntry(body: any, now: Date = new Date()): { entry?: C
       created: now.toISOString(),
     },
   };
+}
+
+const REPEAT_WEEKDAYS = [
+  ["su", "sunday"], ["mo", "monday"], ["tu", "tuesday"], ["we", "wednesday"],
+  ["th", "thursday"], ["fr", "friday"], ["sa", "saturday"],
+];
+
+export function validateNewEntries(body: any, now: Date = new Date()): { entries?: CalendarEntry[]; error?: string } {
+  const { entry, error } = validateNewEntry(body, now);
+  if (!entry) return { error };
+  if (body.repeat_weekdays === undefined) {
+    if (body.repeat_until !== undefined || body.except_dates !== undefined) {
+      return { error: "repeat_until and except_dates need repeat_weekdays" };
+    }
+    return { entries: [entry] };
+  }
+  const weekdays = new Set<number>();
+  if (Array.isArray(body.repeat_weekdays)) {
+    for (const value of body.repeat_weekdays) {
+      if (typeof value !== "string") continue;
+      const day = REPEAT_WEEKDAYS.findIndex((names) => names.includes(value.trim().toLowerCase()));
+      if (day >= 0) weekdays.add(day);
+    }
+  }
+  if (!weekdays.size) return { error: "repeat_weekdays needs at least one valid weekday (mo tu we th fr sa su)" };
+  const until = body.repeat_until;
+  if (typeof until !== "string" || !parseDate(until)) return { error: "repeat_until required: YYYY-MM-DD" };
+  if (until < entry.date) return { error: "repeat_until must not be before date" };
+  const except = body.except_dates === undefined ? [] : body.except_dates;
+  if (!Array.isArray(except) || except.some((day) => typeof day !== "string" || !parseDate(day))) {
+    return { error: "except_dates must be a list of valid YYYY-MM-DD dates" };
+  }
+  const excluded = new Set(except);
+  const dates: string[] = [];
+  // These are house-local calendar dates, not instants separated by 24 hours.
+  // Keeping time/end unchanged preserves the wall clock across offset changes.
+  for (let day = entry.date, span = 1; day <= until; day = addDays(day, 1), span++) {
+    if (span > 366) return { error: "series span must not exceed 366 calendar days" };
+    if (weekdays.has(weekdayOf(day)) && !excluded.has(day)) dates.push(day);
+    if (day === until) break;
+  }
+  if (dates.length > 200) return { error: "series must not exceed 200 entries" };
+  if (!dates.length) return { error: "series has no entries after weekday selection and exceptions" };
+  const series = crypto.randomUUID();
+  return { entries: dates.map((date) => ({ ...entry, id: crypto.randomUUID(), date, series })) };
 }
 
 function sortKey(e: { date: string; time?: string | null }): string {

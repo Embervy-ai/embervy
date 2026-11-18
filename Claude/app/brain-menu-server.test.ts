@@ -54,7 +54,12 @@ test("heads handler forwards only refresh=1, authenticates upstream, and tolerat
 
 
 // Exercise the production routes and durable history without requiring an HTTP framework at startup.
-function commandRoutes(dataDir: string) {
+function commandRoutes(dataDir: string, options: {
+  control?: { port: number; token: string } | null;
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  timeoutMs?: number;
+  log?: (line: string) => void;
+} = {}) {
   const source = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
   const section = (from: string, to: string) => {
     const start = source.indexOf(from);
@@ -72,17 +77,22 @@ function commandRoutes(dataDir: string) {
   const routes = new Map<string, Function>();
   const register = (path: string, handler: Function) => routes.set(path, handler);
   new Function("deps", `
-    const { app, appendFileSync, INBOX, OUTBOX, JsonlHistory, brainMenuCommand, cleanReplyTo } = deps;
+    const { app, appendFileSync, INBOX, OUTBOX, JsonlHistory, brainMenuCommand, cleanReplyTo,
+      readBrainControl, fetch, BRAIN_HEADS_TIMEOUT_MS, shapeBrainHeads, log } = deps;
     const BRAIN_HARNESS = true;
     const claudeCodeCutAvailable = () => false;
     const generateId = () => crypto.randomUUID();
     const S = key => key;
-    const process = { stderr: { write() {} } };
+    const process = { stderr: { write: log } };
     ${new Bun.Transpiler({ loader: "ts" }).transformSync(code)}
   `)({
     app: { get: register, post: register }, appendFileSync,
     INBOX: join(dataDir, "inbox.jsonl"), OUTBOX: join(dataDir, "outbox.jsonl"),
-    JsonlHistory, brainMenuCommand, cleanReplyTo,
+    JsonlHistory, brainMenuCommand, cleanReplyTo, shapeBrainHeads,
+    readBrainControl: () => options.control === undefined ? { port: 3910, token: CONTROL_TOKEN } : options.control,
+    fetch: options.fetch ?? (async () => Response.json(HEADS)),
+    BRAIN_HEADS_TIMEOUT_MS: options.timeoutMs ?? 25_000,
+    log: options.log ?? (() => {}),
   });
   return (path: string, body?: unknown) => routes.get(path)!({
     req: { json: async () => body },
@@ -181,6 +191,128 @@ const HEADS = {
     { name: "grok", label: "Grok", model: "grok-4.7", available: false, reason: "XAI_API_KEY is not set", models: [] },
   ],
 };
+
+const CURRENT_HEADS = {
+  ...HEADS,
+  heads: [
+    { ...HEADS.heads[0]!, models: [
+      { id: "claude-opus-5-5", label: "Default (recommended)", group: "catalog", family: "Opus", version: "Opus 5.5", resolvedModel: "claude-opus-5-5", aliases: ["default", "opus"] },
+      { id: "claude-fable-5-2", label: "Fable", group: "catalog", family: "Fable", version: "Fable 5.2", resolvedModel: "claude-fable-5-2", aliases: ["fable"] },
+    ] },
+    ...HEADS.heads.slice(1),
+  ],
+};
+
+test("switch handler uses authenticated heads separately from request metadata", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "menu-window-switch-"));
+  try {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const logs: string[] = [];
+    let upstream: unknown = CURRENT_HEADS;
+    const call = commandRoutes(dir, {
+      control: { port: 4123, token: CONTROL_TOKEN },
+      fetch: async (url, init) => { requests.push({ url, init }); return Response.json(upstream); },
+      log: line => { logs.push(line); },
+    });
+    const base = { action: "switch", head: "claude", model: "claude-fable-5-2" };
+    const unsuffixed = { ...CURRENT_HEADS, current: { ...CURRENT_HEADS.current, model: "claude-opus-5-5" } };
+    const cases = [
+      { state: CURRENT_HEADS, body: base, command: "/head claude claude-fable-5-2[1m]", fetches: 1 },
+      { state: unsuffixed, body: base, command: "/head claude claude-fable-5-2", fetches: 1 },
+      { state: HEADS, body: base, command: "/head claude claude-fable-5-2", fetches: 1 },
+      { state: CURRENT_HEADS, body: { ...base, model: "claude-fable-5-2[1m]" }, command: "/head claude claude-fable-5-2[1m]", fetches: 1 },
+      { state: CURRENT_HEADS, body: { ...base, head: "gpt", model: "gpt-5.6-terra" }, command: "/head gpt gpt-5.6-terra", fetches: 1 },
+      { state: CURRENT_HEADS, body: { ...base, move: true }, command: "/move claude claude-fable-5-2", fetches: 0 },
+      { state: CURRENT_HEADS, body: { ...base, head: "gpt", model: "gpt-5.6-terra", move: true }, command: "/move gpt gpt-5.6-terra", fetches: 0 },
+      { state: unsuffixed, body: { ...base, current: CURRENT_HEADS.current, heads: CURRENT_HEADS.heads, menu: shapeBrainHeads(CURRENT_HEADS) }, command: "/head claude claude-fable-5-2", fetches: 1 },
+      { state: CURRENT_HEADS, body: { ...base, current: unsuffixed.current, heads: HEADS.heads, menu: shapeBrainHeads(HEADS) }, command: "/head claude claude-fable-5-2[1m]", fetches: 1 },
+    ];
+    let cursor = { offset: 0, seen: [] as string[] };
+    for (const item of cases) {
+      upstream = item.state;
+      const before = requests.length;
+      const result = await call("/api/brain/command", item.body);
+      expect(result.status).toBe(200);
+      expect(result.body.command).toBe(item.command);
+      expect(requests.length - before).toBe(item.fetches);
+      const delivered = readInbox(join(dir, "inbox.jsonl"), cursor);
+      expect(delivered.entries.map(entry => entry.text)).toEqual([item.command]);
+      cursor = delivered.cursor;
+    }
+    for (const request of requests) {
+      expect(request.url).toBe("http://127.0.0.1:4123/heads");
+      expect(request.init.headers).toEqual({ Authorization: `Bearer ${CONTROL_TOKEN}` });
+      expect(request.init.signal).toBeInstanceOf(AbortSignal);
+    }
+    expect(logs.some(line => line.includes("sending unchanged"))).toBe(false);
+    expect(logs.join("")).not.toContain(CONTROL_TOKEN);
+    expect(call("/api/messages").body).toEqual([]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test.each(["unreachable", "timeout", "body timeout", "HTTP 401", "HTTP 404", "HTTP 500", "invalid JSON", "invalid shape", "no control"])(
+  "switch handler sends the unchanged command when heads lookup fails: %s", async failure => {
+    const dir = mkdtempSync(join(tmpdir(), "menu-window-fallback-"));
+    try {
+      const logs: string[] = [];
+      let requests = 0;
+      let aborted = false;
+      const call = commandRoutes(dir, {
+        ...(failure === "no control" ? { control: null } : {}),
+        timeoutMs: 5,
+        log: line => { logs.push(line); },
+        fetch: async (_url, init) => {
+          requests++;
+          if (failure === "unreachable") throw new Error("connection refused\nprivate detail");
+          if (failure === "timeout") return new Promise<Response>((_resolve, reject) => {
+            init.signal!.addEventListener("abort", () => { aborted = true; reject(init.signal!.reason); }, { once: true });
+          });
+          if (failure === "body timeout") return new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"current":'));
+              init.signal!.addEventListener("abort", () => { aborted = true; controller.error(init.signal!.reason); }, { once: true });
+            },
+          }));
+          if (failure.startsWith("HTTP")) return new Response("unavailable", { status: Number(failure.slice(5)) });
+          if (failure === "invalid JSON") return new Response("not json");
+          return Response.json({ current: null });
+        },
+      });
+      const result = await call("/api/brain/command", {
+        action: "switch", head: "claude", model: "claude-fable-5-2",
+        current: CURRENT_HEADS.current, heads: CURRENT_HEADS.heads,
+      });
+      expect(result.status).toBe(200);
+      expect(result.body.command).toBe("/head claude claude-fable-5-2");
+      expect(readInbox(join(dir, "inbox.jsonl"), { offset: 0, seen: [] }).entries.map(entry => entry.text)).toEqual(["/head claude claude-fable-5-2"]);
+      expect(requests).toBe(failure === "no control" ? 0 : 1);
+      if (failure.includes("timeout")) expect(aborted).toBe(true);
+      const reason = failure === "no control" ? "control not configured" : failure.startsWith("invalid") ? "unreadable response" : failure.includes("timeout") ? "timeout" : failure;
+      const fallback = logs.filter(line => line.includes("/heads"));
+      expect(fallback).toEqual([`embervy-app: brain menu: /heads ${reason}; sending unchanged command\n`]);
+      expect(logs.join("")).not.toContain(CONTROL_TOKEN);
+      expect(logs.join("")).not.toContain("private detail");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  },
+);
+
+test("invalid commands, moves, effort and restart do not need a heads lookup", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "menu-window-no-lookup-"));
+  try {
+    let requests = 0;
+    const call = commandRoutes(dir, { fetch: async () => { requests++; throw new Error("unavailable"); } });
+    for (const body of [
+      { action: "switch", head: "claude", model: "bad; /stop" },
+      { action: "switch", head: "claude", model: "opus", effort: "high" },
+    ]) expect((await call("/api/brain/command", body)).status).toBe(400);
+    for (const [body, command] of [
+      [{ action: "switch", head: "claude", model: "opus", move: true }, "/move claude opus"],
+      [{ action: "effort", level: "high" }, "/effort high"],
+      [{ action: "restart" }, "/respawn"],
+    ] as const) expect((await call("/api/brain/command", body)).body.command).toBe(command);
+    expect(requests).toBe(0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 interface FakeBrain { port: number; asked: () => string[]; mode: (m: "ok" | "garbage" | "missing") => void; stop: () => void }
 function fakeBrain(): FakeBrain {

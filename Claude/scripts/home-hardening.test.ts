@@ -554,7 +554,10 @@ describe("live thresholds: resolution order (context_watchdog.sh --thresholds)",
     try {
       const config = "WATCHDOG_WARN_TOKENS=800000\nWATCHDOG_CUT_TOKENS=900000\nWATCHDOG_CUT_TOKENS_GPT=230000\n";
       expect(thresholds(home(config, "200000 220000\ngpt own\n"))).toBe("200000 230000");
-      expect(thresholds(home(config, "180000 210000\nkimi own\n"))).toBe("180000 210000");
+      expect(thresholds(home(config, "720000 840000\nkimi own 1048576\n"))).toBe("720000 840000");
+      expect(thresholds(home(config, "180000 210000\nkimi own 262144\n"))).toBe("180000 210000");
+      expect(thresholds(home(config + "WATCHDOG_WARN_TOKENS_KIMI=180000\nWATCHDOG_CUT_TOKENS_KIMI=210000\n",
+        "720000 840000\nkimi own 1048576\n"))).toBe("180000 210000");
     } finally { cleanup(); }
   });
 

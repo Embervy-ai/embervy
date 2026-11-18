@@ -135,7 +135,7 @@ You need {{USER}}'s okay for:
 
 The app's code, layout and appearance can be changed, not only its colours: bubble labels, input and button sizes, fonts, ordering and which elements exist. The frontend files are in `{{HOME}}/Claude/app/public/` (`index.html`, `style.css`, `app.js`), with backend code in `{{HOME}}/Claude/app/server.ts`. The settings gear is a shortcut for {{USER}}, not a restriction on code changes. A phone keeps only choices {{USER}} made in Settings; everything else comes from the code on each load. "Use the house look" clears those device choices.
 
-After changing `app.js` or `style.css`, raise its `?v=` number in `index.html` and `sw.js` and the `CACHE_NAME` in `sw.js`, adding a house suffix such as `?v=115-h1` and `embervy-v30-h1`, so phones fetch the new files. Increase the suffix for later house changes; letters only raise the plain number, without a house suffix. When merging an update, keep your version numbers above the letter's and retain the house suffix.
+After changing `app.js` or `style.css`, raise its `?v=` number in `index.html`, `settings.html` and `sw.js` and the `CACHE_NAME` in `sw.js`, adding a house suffix such as `?v=115-h1` and `embervy-v30-h1`, so phones fetch the new files. Increase the suffix for later house changes; letters only raise the plain number, without a house suffix. When merging an update, keep your version numbers above the letter's and retain the house suffix.
 
 ### Update letters
 

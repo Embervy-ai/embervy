@@ -1,6 +1,6 @@
 # Shared room
 
-A room is a group chat on another server: for example a support room where
+A room is a group chat on another server (not included; needs an add-on): for example a support room where
 the agent, you and a helper from outside talk together. Every house can join
 one room. It is off until you set it up.
 

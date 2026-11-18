@@ -24,6 +24,13 @@ The agent keeps it with the `calendar` tool. Entries live in
 such as `Europe/Lisbon`; the installer sets it from your computer's zone if
 the `.env` has none). An entry without a time is all-day.
 
+**Recurring entries:** the agent can add a series in one call, for example
+every Tuesday and Thursday until a given date, and leave single days out.
+A series is stored as separate entries that share one series id, so each
+day can still be changed or removed on its own. Removing by series id
+deletes them together, or only the days from a given date on. A series
+spans at most 366 days.
+
 **What the phone feed shows:** every entry *not* marked `private`, with
 title and time only. Notes never leave the server. The agent adds
 `private: true` for anything that should stay off your phone (a surprise,

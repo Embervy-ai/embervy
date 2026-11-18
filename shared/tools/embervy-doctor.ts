@@ -421,6 +421,28 @@ async function checkRagToken() {
   }
 }
 
+// Treat optional remote trace fields as data, never as ready-to-print error text.
+function dreamAttemptExplanation(health: any): string {
+  if (typeof health.dream_last_attempt !== "string") return "";
+  const attempted = Date.parse(health.dream_last_attempt);
+  const succeeded = Date.parse(health.dream_last_run);
+  if (!Number.isFinite(attempted) || attempted > Date.now()
+    || (Number.isFinite(succeeded) && attempted < succeeded)) return "";
+  if (health.dream_last_result === "empty") return " The last dream attempt had nothing to write.";
+  if (health.dream_last_result !== "failed") return "";
+  const error = health.dream_last_error;
+  const status = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599
+    ? ` (HTTP ${error.status})` : "";
+  switch (error?.class) {
+    case "provider_http": return ` The last dream attempt failed because the provider returned an error${status} after the configured attempts.`;
+    case "provider_unreachable": return " The last dream attempt failed because the provider could not be reached.";
+    case "provider_response": return " The last dream attempt failed because the provider response was empty or unusable.";
+    case "write_failed": return " The last dream attempt failed because the dream note could not be saved.";
+    case "unexpected": return " The last dream attempt failed because of an internal worker error.";
+    default: return "";
+  }
+}
+
 async function checkMemoryNightly() {
   const report = (status: Status, detail: string) => add({ id: "memory.nightly", group: "Core",
     label: "Memory daemon and dream", status, detail,
@@ -466,7 +488,7 @@ async function checkMemoryNightly() {
         if (born === null) { unchecked = true; return `${kind}: not checked — never; house age unknown`; }
         if (Date.now() - born < windowMs) return `${kind}: never — not due yet`;
         warn = true;
-        return `${kind}: the nightly run has not happened yet`;
+        return `${kind}: the nightly run has not happened yet${kind === "dream" ? dreamAttemptExplanation(health) : ""}`;
       }
       const time = Date.parse(run);
       if (!Number.isFinite(time) || time > Date.now()) {
@@ -474,7 +496,7 @@ async function checkMemoryNightly() {
       }
       if (Date.now() - time <= windowMs) return `${kind}: successful run within 26 hours`;
       warn = true;
-      return `${kind}: last successful run is older than 26 hours (${run})`;
+      return `${kind}: last successful run is older than 26 hours (${run})${kind === "dream" ? dreamAttemptExplanation(health) : ""}`;
     });
     if (dreamOff) details.push("dream: off by the house's choice (EMBERVY_DREAM=off)");
     report(warn ? "WARN" : unchecked ? "SKIP" : "OK", details.join("; "));

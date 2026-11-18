@@ -1,7 +1,7 @@
 // Handles push notifications and caches static assets.
 
-const CACHE_NAME = "embervy-v66";
-const CACHE_URLS = ["/style.css?v=130", "/app.js?v=147", "/settings.js?v=114", "/games.js?v=1", "/manifest.json"];
+const CACHE_NAME = "embervy-v69";
+const CACHE_URLS = ["/style.css?v=131", "/app.js?v=149", "/settings.js?v=115", "/games.js?v=1", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

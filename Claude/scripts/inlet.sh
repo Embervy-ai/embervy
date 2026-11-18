@@ -36,7 +36,53 @@ fi
 # the whole hook under `set -e` — a broken inlet must never block the agent.
 mkdir -p "$EMBERVY_HOME/logs" || true
 TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
-RESULT=$(timeout 25s bash -s -- "$PROMPT" "$TRANSCRIPT" 2>>"$EMBERVY_HOME/logs/inlet.log" <<'WORKER' || true
+CHUNK_SESSION=$(echo "$INPUT" | jq -r '.session_id | select(type == "string")' 2>/dev/null || true)
+RESULT=$(timeout 25s bash -s -- "$PROMPT" "$TRANSCRIPT" "$CHUNK_SESSION" 2>>"$EMBERVY_HOME/logs/inlet.log" <<'WORKER' || true
+# Never inherit another session's repeat state, including for invalid IDs.
+unset INLET_COUNTER_FILE INLET_CHUNK_CACHE_DIR
+prepare_chunk_cache() {
+  local session="$3" root="$EMBERVY_HOME/state/inlet-chunk-cache"
+  local counter="$EMBERVY_HOME/state/inlet-chunk-turn-counter" turn temporary
+  local LC_ALL=C
+  [[ "$session" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || return 1
+  # Physical paths only: neither creation nor pruning may follow a cache symlink.
+  [ ! -L "$root" ] && [ ! -L "$root/$session" ] || return 1
+  mkdir -p -m 700 "$root" "$root/$session" || return 1
+  # Serialize this session through the worker: its snapshot and chunks.json
+  # must belong to the same invocation even on a double trigger.
+  exec 8>"$root/$session/turn.lock" || return 1
+  flock 8 || return 1
+  exec 9>"${counter}.lock" || return 1
+  flock 9 || return 1
+  if [ -e "$counter" ]; then
+    turn=$(cat "$counter") || return 1
+    [[ "$turn" =~ ^[0-9]{1,15}$ ]] || return 1
+    turn=$((10#$turn + 1))
+  else
+    turn=0
+  fi
+  # Independent of the clock counter below, which resets on session changes.
+  # Like Brain's value - 1, the first worker turn is zero, not the next turn.
+  temporary=$(mktemp "${counter}.XXXXXX") || return 1
+  printf '%s\n' "$turn" > "$temporary" && mv -f "$temporary" "$counter" || return 1
+  temporary=$(mktemp "$root/$session/turn.XXXXXX") || return 1
+  printf '%s\n' "$turn" > "$temporary" && mv -f "$temporary" "$root/$session/turn" || return 1
+  flock -u 9
+  exec 9>&-
+  # The snapshot rename refreshes the session even when retrieval is empty.
+  # Both finds stay physical: -delete removes links, never their targets.
+  find "$root" -mindepth 1 -maxdepth 1 -type d ! -name "$session" -mmin +10080 \
+    -exec find {} -depth -delete \; 2>/dev/null || true
+  export INLET_COUNTER_FILE="$root/$session/turn"
+  export INLET_CHUNK_CACHE_DIR="$root/$session"
+}
+# Private files as well as directories; cache failures must not block recall.
+OLD_UMASK=$(umask)
+umask 077
+if ! prepare_chunk_cache "$@" 2>/dev/null; then
+  exec 8>&- 9>&-
+fi
+umask "$OLD_UMASK"
 RECENT=$(timeout 1s python3 -B - "$2" "$1" "$EMBERVY_HOME/Claude/scripts" 2>/dev/null <<'PY' || true
 from collections import deque
 import json

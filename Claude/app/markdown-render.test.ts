@@ -27,6 +27,7 @@ async function elements(html: string): Promise<El[]> {
 
 const ALLOWED: Record<string, string[]> = {
   div: ["class"],
+  table: ["class"], thead: [], tbody: [], tr: [], th: ["class"], td: ["class"],
   button: ["type", "class", "aria-label"],
   img: ["src", "alt", "class", "loading"],
   a: ["href", "target", "rel"],

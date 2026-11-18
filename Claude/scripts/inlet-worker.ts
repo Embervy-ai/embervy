@@ -15,6 +15,15 @@ import {
 } from "./inlet-temporal.ts";
 import { envValue } from "../../shared/scripts/legacy-names.ts";
 import { contextLine } from "../../shared/scripts/context-text.ts";
+import {
+  findThoughts, renderThoughts, selectThoughts, THOUGHT_FIND_ARGS, thoughtCalibration,
+  thoughtCandidates, thoughtKey, thoughtQueries, thoughtSettings, type Thought,
+} from "./inlet-thoughts.ts";
+
+const THOUGHTS_ENABLED = process.env.INLET_THOUGHTS === "1";
+let thoughtQueryCount = 0;
+let calibrationCandidates: Thought[] = [];
+if (THOUGHTS_ENABLED) process.on("exit", () => console.error(thoughtCalibration(thoughtQueryCount, calibrationCandidates)));
 
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
 const EMBERVY_KEY = envValue("EMBERVY_API_KEY") || "";
@@ -101,25 +110,29 @@ async function memoryLookup(name: string): Promise<{
   }
 }
 
+async function memoryFindResponse(query: string, limit: number, extra = {}, signal = AbortSignal.timeout(8_000)): Promise<any> {
+  const res = await fetch(`${EMBERVY_URL}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${EMBERVY_KEY}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "find", arguments: { query, limit, ...extra } },
+    }),
+    signal,
+  });
+  if (!res.ok) throw new Error("Memory search failed");
+  return await res.json();
+}
+
 async function memoryFind(query: string, limit = 5): Promise<string> {
   if (!HAS_MEMORY) return "";
   try {
-    const res = await fetch(`${EMBERVY_URL}/mcp`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${EMBERVY_KEY}`,
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: { name: "find", arguments: { query, limit } },
-      }),
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) return "";
-    const data = (await res.json()) as any;
+    const data = await memoryFindResponse(query, limit);
     return data.result?.content?.[0]?.text || "";
   } catch {
     return "";
@@ -288,7 +301,12 @@ function formatEntityBlock(
   return lines.join("\n");
 }
 
-type EntityResult = { block: string; canon: any[]; card?: string };
+type EntityResult = { block: string; canon: any[]; card?: string; shownIds?: number[] };
+
+function shownObservationIds(lookup: NonNullable<Awaited<ReturnType<typeof memoryLookup>>>, canon: any[]): number[] {
+  return withoutCanon(lookup, canon).recent.slice(0, 5)
+    .map((entry: any) => entry?.id).filter((id: unknown): id is number => typeof id === "number");
+}
 
 function canonOf(lookup: Awaited<ReturnType<typeof memoryLookup>>): any[] {
   return Array.isArray(lookup?.canon)
@@ -307,26 +325,29 @@ async function personBlock(name: string): Promise<EntityResult> {
   const canon = canonOf(lookup);
   const card = typeof lookup?.card?.description === "string" ? lookup.card.description : undefined;
   if (!lookup || (!lookup.card && !lookup.recent?.length)) return { block: "", canon, card };
-  return { block: formatEntityBlock(name, withoutCanon(lookup, canon)), canon, card };
+  return { block: formatEntityBlock(name, withoutCanon(lookup, canon)), canon, card,
+    shownIds: THOUGHTS_ENABLED ? shownObservationIds(lookup, canon) : [] };
 }
 
 async function placeBlock(place: string): Promise<EntityResult> {
   const lookup = await memoryLookup(place);
   const canon = canonOf(lookup);
   if (lookup?.card || lookup?.recent?.length) {
-    return { block: `## Place: ${place}\n${formatEntityBlock(place, withoutCanon(lookup!, canon))}`, canon };
+    return { block: `## Place: ${place}\n${formatEntityBlock(place, withoutCanon(lookup!, canon))}`, canon,
+      shownIds: THOUGHTS_ENABLED ? shownObservationIds(lookup!, canon) : [] };
   }
   const search = await memoryFind(place, 5);
   if (!search) return { block: "", canon };
   if (search.startsWith("Found 0 events")) return { block: "", canon };
   const trimmed = search.length > 1000 ? search.slice(0, 1000) + "\n… [truncated]" : search;
-  return { block: `## Place: ${place} (search fallback)\n${trimmed}`, canon };
+  return { block: `## Place: ${place} (search fallback)\n${trimmed}`, canon,
+    shownIds: THOUGHTS_ENABLED ? [...trimmed.matchAll(/^\[(\d+)\]/gm)].map(match => Number(match[1])) : [] };
 }
 
 // Canon facts of the people and places named stand above every excerpt with an explicit
 // precedence: an old excerpt may still say otherwise, but it never arrives uncontradicted.
 // Newest first, so a correction of a correction wins.
-function canonBlock(entries: any[]): string {
+function canonBlock(entries: any[], shownIds?: Set<number>): string {
   const seen = new Set<unknown>();
   const lines: string[] = [];
   for (const entry of [...entries].sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")))) {
@@ -335,6 +356,7 @@ function canonBlock(entries: any[]): string {
       seen.add(entry.id);
     }
     const date = String(entry.ts || "").slice(0, 10);
+    if (typeof entry.id === "number") shownIds?.add(entry.id);
     lines.push(`- ${date ? `[${date}] ` : ""}${entry.content.replace(/\s+/g, " ").trim().slice(0, 400)}${entry.id != null ? ` [#${entry.id}]` : ""}`);
     if (lines.length >= 12) break;
   }
@@ -361,7 +383,7 @@ async function ragHits(query: string, topK = 5): Promise<any[]> {
 }
 
 type Hit = any;
-const hitKey = (r: Hit) => `${r.filename}#${r.chunkIndex}`;
+const hitKey = (r: Hit) => typeof r === "string" ? r : `${r.filename}#${r.chunkIndex}`;
 
 type ChunkCache = { file: string; turn: number; window: number; shown: Map<string, number> };
 function loadChunkCache(): ChunkCache | null {
@@ -588,22 +610,43 @@ const ragQueries: RagQuery[] = cls?.rag_queries?.length
   ? cls.rag_queries
   : [{ q: prompt }];
 
-const [personResults, placeResults, rag, time] = await Promise.all([
+const thoughtSearches = THOUGHTS_ENABLED && HAS_MEMORY ? thoughtQueries(cls, prompt) : [];
+thoughtQueryCount = thoughtSearches.length;
+const [personResults, placeResults, rag, time, thoughts] = await Promise.all([
   Promise.all(
     personNames.map((p) => personBlock(p).then((b) => ({ name: p, block: b }))),
   ),
   Promise.all(placeNames.map((pl) => placeBlock(pl))),
   ragSearch(ragQueries, cls?.turn_category, TEMPORAL?.mode === "boost" ? TEMPORAL : null),
   timePromise,
+  findThoughts(thoughtSearches, (query, signal) => memoryFindResponse(query, 6, THOUGHT_FIND_ARGS, signal)),
 ]);
 
-const canon = canonBlock([...personResults.flatMap((r) => r.block.canon), ...placeResults.flatMap((r) => r.canon)]);
+const canonIds = THOUGHTS_ENABLED ? new Set<number>() : undefined;
+const canon = canonBlock([...personResults.flatMap((r) => r.block.canon), ...placeResults.flatMap((r) => r.canon)], canonIds);
 if (canon) parts.push(canon);
 for (const { name, block } of personResults) {
   if (block.block) parts.push(`## Person: ${name}\n${block.block}`);
 }
 for (const result of placeResults) {
   if (result.block) parts.push(result.block);
+}
+
+if (THOUGHTS_ENABLED && thoughts) {
+  try {
+    const excluded = new Set<number>([
+      ...personResults.flatMap(result => result.block.shownIds ?? []),
+      ...placeResults.flatMap(result => result.shownIds ?? []),
+      ...(canonIds ?? []),
+    ]);
+    calibrationCandidates = thoughtCandidates(thoughts, excluded);
+    const selected = selectThoughts(calibrationCandidates, thoughtSettings(process.env), recentlyShown);
+    const block = renderThoughts(selected);
+    if (block) {
+      parts.push(block);
+      rememberChunks(selected.map(thoughtKey));
+    }
+  } catch { /* Optional recall must never remove the existing context. */ }
 }
 
 let chronicle: Hit[] = rag?.hits ?? [];

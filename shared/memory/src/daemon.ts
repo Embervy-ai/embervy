@@ -9,7 +9,7 @@ import { retryD1Write, type RetryPause } from "./d1-retry";
 import { eventVectorIds, ensureEdgesTable, isTemplateSurface, consolidateEvent, retryConsolidations, bindChunks } from "./index";
 
 const DEFAULT_LLM_URL = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_LLM_MODEL = "mistralai/mistral-medium-3.1";
+const DEFAULT_LLM_MODEL = "mistralai/mistral-medium-3-5";
 const OPENROUTER_TIMEOUT_MS = 120_000;
 // A rate-limited or briefly unavailable provider usually recovers within minutes.
 // Waits stay well inside the 15-minute limit of a scheduled invocation; a timeout

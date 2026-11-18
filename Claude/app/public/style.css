@@ -91,6 +91,9 @@
 .approval-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
 .approval-actions button { padding: 10px 18px; min-height: 44px; max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; border: 1px solid currentColor; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .approval-actions .approval-allow { background: var(--accent); color: var(--on-accent); }
+/* The answer that writes a lasting rule reads as a quiet text choice below the two main answers. */
+.approval-actions .approval-lasting { border: 0; padding: 4px 0; background: none; font-size: 14px; text-align: left; text-decoration: underline; text-underline-offset: 3px; }
+.approval-actions .approval-lasting small { display: inline-block; margin-top: 2px; font-size: 12px; text-decoration: none; opacity: .75; }
 .approval-actions button:disabled { opacity: .6; cursor: wait; }
 .approval-actions button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .approval-status { color: inherit; font-size: .9em; }
@@ -272,6 +275,7 @@ header h1 {
 .message {
   position: relative;
   max-width: 85%;
+  min-width: 0;
   margin-bottom: 12px;
   padding: 12px 16px;
   border-radius: var(--radius);
@@ -348,6 +352,41 @@ header h1 {
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+/* Keep intrinsic table width inside the bubble, including flex-based saved views. */
+.message .markdown-table-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  margin: 8px 0;
+  white-space: normal;
+}
+.message .markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: inherit;
+}
+.message .markdown-table th,
+.message .markdown-table td {
+  /* Words stay whole, so a column is never narrower than its longest word;
+     short numeric tables then fit a phone without sideways scrolling. */
+  min-width: 3rem;
+  max-width: 16rem;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: break-word;
+  vertical-align: top;
+}
+/* A bubble that carries a table may use the full row. */
+.message:has(.markdown-table-scroll) { max-width: 100%; }
+.message .markdown-table { font-size: 0.92em; }
+.message .markdown-table th { background: var(--shadow); font-weight: 600; }
+.message .markdown-table .ta-left { text-align: left; }
+.message .markdown-table .ta-center { text-align: center; }
+/* Right-aligned columns hold numbers and units, which read badly when broken. */
+.message .markdown-table .ta-right { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .message .copybox { position: relative; margin: 8px 0; }
 .message .copybox pre { margin: 0; padding-top: 38px; }
 .copybox-btn {

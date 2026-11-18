@@ -10,6 +10,7 @@ export function calendarToolDefinition(userLabel: string) {
     name: "calendar",
     description:
       `Your own calendar in the app — it survives sessions. add / list / remove your entries (house-local date and time). ` +
+      `For a recurring entry, add repeat_weekdays (mo tu we th fr sa su) and repeat_until; except_dates leaves single days out. The series is stored as separate entries that share one series id; remove with series deletes them together. ` +
       `When the calendar module is on, ${userLabel} can subscribe to it read-only on their phone: every entry shows there with title and time only (never the note) unless you add it with private=true. ` +
       `list also shows ${userLabel}'s own appointments from their calendar links, read-only and marked as theirs. ` +
       `feed returns the subscription link to give ${userLabel} when they ask for it.`,
@@ -23,6 +24,11 @@ export function calendarToolDefinition(userLabel: string) {
         end: { type: "string", description: "Optional end HH:MM on the same day (add)" },
         note: { type: "string", description: "Optional note — stays in the house, never in the phone feed (add)" },
         private: { type: "boolean", description: "true keeps this entry off the phone feed entirely (add)" },
+        repeat_weekdays: { type: "array", items: { type: "string" } },
+        repeat_until: { type: "string" },
+        except_dates: { type: "array", items: { type: "string" } },
+        series: { type: "string" },
+        from: { type: "string" },
         id: { type: "string", description: "Entry id (remove)" },
         days: { type: "number", description: "How many days of their calendar to show, 1-30, default 14 (list)" },
       },
@@ -54,14 +60,17 @@ export async function callCalendarTool(
           end: args?.end,
           note: args?.note,
           private: args?.private === true,
+          repeat_weekdays: args?.repeat_weekdays,
+          repeat_until: args?.repeat_until,
+          except_dates: args?.except_dates,
         }),
       });
     } else if (action === "list") {
       const days = Number(args?.days);
       res = await doFetch(`${api}${Number.isFinite(days) && days > 0 ? `?days=${Math.round(days)}` : ""}`, { headers: o.headers() });
     } else if (action === "remove") {
-      if (!args?.id) return text("remove needs the entry id (see list)");
-      res = await doFetch(`${api}/delete`, { method: "POST", headers: o.headers(), body: JSON.stringify({ id: args.id }) });
+      if (!args?.id && !args?.series) return text("remove needs an entry id or series (see list)");
+      res = await doFetch(`${api}/delete`, { method: "POST", headers: o.headers(), body: JSON.stringify({ id: args?.id, series: args?.series, from: args?.from }) });
     } else if (action === "feed") {
       res = await doFetch(`${api}/feed`, { headers: o.headers() });
     } else {

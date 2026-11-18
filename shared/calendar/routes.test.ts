@@ -1,4 +1,7 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
+import { readEntries, validateNewEntries, writeEntries } from "./store";
+import { addDays } from "./time";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,6 +156,142 @@ describe("calendar API through a throw-away server", () => {
       off.stop(true);
     }
   });
+});
+
+const seriesRequest = {
+  title: "Practice", date: "2026-09-28", time: "17:30", repeat_weekdays: ["mo", "th"], repeat_until: "2026-11-08",
+};
+const request = (body: unknown) => new Request("http://localhost/api/internal/calendar", { method: "POST", body: JSON.stringify(body) });
+
+async function withCalendar(check: (h: ReturnType<typeof createCalendarHandlers>, file: string) => Promise<void>) {
+  const dir = mkdtempSync(join(tmpdir(), "cal-series-"));
+  const file = join(dir, "calendar.json");
+  writeEntries(file, validateNewEntries({ title: "Unrelated", date: "2026-09-28" }).entries!);
+  try { await check(createCalendarHandlers(cfgFor(dir), () => Date.UTC(2026, 8, 28, 10)), file); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+describe("series routes", () => {
+  test("the shared tool forwards series fields through HTTP for add and removal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cal-series-tool-"));
+    const server = serve(cfgFor(dir));
+    const call = async (args: Record<string, unknown>) => (await callCalendarTool(args, {
+      baseUrl: `http://127.0.0.1:${server.port}`, headers: () => ({ "content-type": "application/json" }),
+    })).content[0].text;
+    try {
+      const added = JSON.parse(await call({ action: "add", ...seriesRequest, except_dates: ["2026-10-01", "2026-10-19"] }));
+      expect(added.entries.map((entry: any) => entry.date)).toEqual([
+        "2026-09-28", "2026-10-05", "2026-10-08", "2026-10-12", "2026-10-15",
+        "2026-10-22", "2026-10-26", "2026-10-29", "2026-11-02", "2026-11-05",
+      ]);
+      expect(JSON.parse(await call({ action: "list" })).agent_calendar).toEqual(added.entries);
+      expect(JSON.parse(await call({ action: "remove", series: added.series, from: "2026-10-15" }))).toEqual({ ok: true, removed: 6 });
+      expect(JSON.parse(await call({ action: "list" })).agent_calendar).toEqual(added.entries.slice(0, 4));
+      expect(JSON.parse(await call({ action: "remove", series: added.series }))).toEqual({ ok: true, removed: 4 });
+      expect(JSON.parse(await call({ action: "list" })).agent_calendar).toEqual([]);
+    } finally { server.stop(true); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  const daily = ["mo", "tu", "we", "th", "fr", "sa", "su"];
+  const invalid: [string, Record<string, unknown>, string][] = [
+    ["span", { repeat_until: addDays(seriesRequest.date, 366) }, "series span must not exceed 366 calendar days"],
+    ["entry count", { repeat_weekdays: daily, repeat_until: addDays(seriesRequest.date, 200) }, "series must not exceed 200 entries"],
+    ["empty weekdays", { repeat_weekdays: [] }, "repeat_weekdays needs at least one valid weekday"],
+    ["unknown weekdays", { repeat_weekdays: ["noday", 3] }, "repeat_weekdays needs at least one valid weekday"],
+    ["weekday list type", { repeat_weekdays: "mo" }, "repeat_weekdays needs at least one valid weekday"],
+    ["missing end", { repeat_until: undefined }, "repeat_until required: YYYY-MM-DD"],
+    ["invalid end", { repeat_until: "2026-02-30" }, "repeat_until required: YYYY-MM-DD"],
+    ["end before start", { repeat_until: "2026-09-27" }, "repeat_until must not be before date"],
+    ["invalid exception", { except_dates: ["2026-02-30"] }, "except_dates must be a list of valid YYYY-MM-DD dates"],
+    ["invalid exception format", { except_dates: ["2026-9-28"] }, "except_dates must be a list of valid YYYY-MM-DD dates"],
+    ["exception type", { except_dates: [null] }, "except_dates must be a list of valid YYYY-MM-DD dates"],
+    ["exception list type", { except_dates: "2026-09-28" }, "except_dates must be a list of valid YYYY-MM-DD dates"],
+    ["null exception list", { except_dates: null }, "except_dates must be a list of valid YYYY-MM-DD dates"],
+    ["all excluded", { repeat_until: seriesRequest.date, except_dates: [seriesRequest.date] }, "series has no entries after weekday selection and exceptions"],
+    ["no matching weekday", { repeat_until: seriesRequest.date, repeat_weekdays: ["tu"] }, "series has no entries after weekday selection and exceptions"],
+    ["end without weekdays", { repeat_weekdays: undefined }, "repeat_until and except_dates need repeat_weekdays"],
+  ];
+  for (const [name, changes, message] of invalid) {
+    test(`${name} rejects the whole request without writing`, () => withCalendar(async (h, file) => {
+      const before = fs.readFileSync(file, "utf8");
+      const writer = spyOn(fs, "writeFileSync");
+      try {
+        const response = await h.add(request({ ...seriesRequest, ...changes }));
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toContain(message);
+        expect(writer).not.toHaveBeenCalled();
+        expect(fs.readFileSync(file, "utf8")).toBe(before);
+      } finally { writer.mockRestore(); }
+    }));
+  }
+
+  test("a series commits once and list includes both entry and series identifiers", () => withCalendar(async (h, file) => {
+    const writer = spyOn(fs, "writeFileSync");
+    const rename = spyOn(fs, "renameSync");
+    let added: any;
+    try {
+      const response = await h.add(request(seriesRequest));
+      expect(response.status).toBe(200);
+      added = await response.json();
+      expect(writer).toHaveBeenCalledTimes(1);
+      expect(rename).toHaveBeenCalledTimes(1);
+    } finally { writer.mockRestore(); rename.mockRestore(); }
+    const list = await (await h.list(new Request("http://localhost/api/internal/calendar"))).json();
+    expect(list.agent_calendar.filter((entry: any) => entry.series === added.series)).toEqual(added.entries);
+    expect(added.entries).toHaveLength(12);
+    expect(added.entries.every((entry: any) => typeof entry.id === "string" && entry.series === added.series)).toBe(true);
+    expect(readEntries(file)).toHaveLength(13);
+  }));
+
+  for (const stage of ["write", "rename"] as const) {
+    test(`a failed ${stage} leaves the original file intact and no staged data`, () => withCalendar(async (h, file) => {
+      const before = fs.readFileSync(file, "utf8");
+      const originalWrite = fs.writeFileSync;
+      const fail = stage === "write"
+        ? spyOn(fs, "writeFileSync").mockImplementation((path: any) => {
+          originalWrite(path, "[{\"partial\":", { mode: 0o600 });
+          throw new Error("injected write failure");
+        })
+        : spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("injected rename failure"); });
+      try {
+        await expect(h.add(request(seriesRequest))).rejects.toThrow(`injected ${stage} failure`);
+        expect(fail).toHaveBeenCalledTimes(1);
+        expect(fs.readFileSync(file, "utf8")).toBe(before);
+        expect(fs.readdirSync(join(file, ".."))).toEqual(["calendar.json"]);
+      } finally { fail.mockRestore(); }
+    }));
+  }
+
+  test("removal by series, inclusive cutoff and individual id leaves other entries intact", () => withCalendar(async (h, file) => {
+    const first = await (await h.add(request(seriesRequest))).json();
+    const second = await (await h.add(request({ ...seriesRequest, title: "Other series" }))).json();
+    expect(first.series).not.toBe(second.series);
+    const unrelated = readEntries(file).filter((entry) => entry.series !== first.series);
+    const one = first.entries[0];
+    expect(await (await h.remove(request({ id: one.id }))).json()).toEqual({ ok: true, removed: 1 });
+    expect(readEntries(file).filter((entry) => entry.series === first.series)).toHaveLength(11);
+    const cutoff = "2026-10-15";
+    const later = first.entries.filter((entry: any) => entry.date >= cutoff);
+    expect(await (await h.remove(request({ series: first.series, from: cutoff }))).json()).toEqual({ ok: true, removed: later.length });
+    const remaining = first.entries.filter((entry: any) => entry.id !== one.id && entry.date < cutoff);
+    expect(readEntries(file).filter((entry) => entry.series === first.series)).toEqual(remaining);
+    expect(await (await h.remove(request({ series: first.series }))).json()).toEqual({ ok: true, removed: remaining.length });
+    expect(readEntries(file)).toEqual(unrelated);
+  }));
+
+  test("unknown series, invalid selectors and a cutoff beyond the series change no bytes", () => withCalendar(async (h, file) => {
+    const added = await (await h.add(request(seriesRequest))).json();
+    const before = fs.readFileSync(file, "utf8");
+    const unknown = await h.remove(request({ series: "unknown" }));
+    expect(unknown.status).toBe(404);
+    expect((await unknown.json()).error).toBe("no series with that id in your calendar");
+    for (const args of [
+      { id: added.entries[0].id, series: added.series }, { series: added.series, from: "2026-02-30" },
+      { series: added.series, from: null }, { id: added.entries[0].id, from: "2026-10-01" }, {},
+    ]) expect((await h.remove(request(args))).status).toBe(400);
+    expect(await (await h.remove(request({ series: added.series, from: "2027-01-01" }))).json()).toEqual({ ok: true, removed: 0 });
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+  }));
 });
 
 describe("wiring helpers", () => {

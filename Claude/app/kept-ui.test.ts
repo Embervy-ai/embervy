@@ -236,7 +236,7 @@ test("actions remain a named native button with default keyboard activation and 
   expect(helper).toContain('document.createElement("button")');
   expect(helper).toContain('button.type = "button"');
   expect(helper).toContain('button.addEventListener("click", action)');
-  expect(actions).toContain('keptButton("⋯", () => showEmojiPicker(div, msgId))');
+  expect(actions).toContain('keptButton("⋯", (event) => showEmojiPicker(div, msgId, event.detail === 0 && !event.pointerType))');
   expect(actions).toContain('button.setAttribute("aria-label", t("kept.actions"))');
   expect(actions).toContain('div.appendChild(button)');
   expect(helper + actions).not.toMatch(/tabIndex|tabindex|aria-hidden|disabled|\.hidden/);
@@ -245,6 +245,152 @@ test("actions remain a named native button with default keyboard activation and 
     expect(section(start, end)).toContain('.msg-quote, .kept-marker, .message-actions").forEach(el => el.remove())');
   }
 });
+
+// Small DOM/event harness, like the other UI tests: execute the real bubble
+// builders and listeners. Native click synthesis and Tab traversal belong to
+// the browser; below we supply their event shapes and check Tab is not trapped.
+function messageMenuHarness(voice: boolean) {
+  const timers = new Map<number, { callback: () => void; ms: number }>();
+  let nextTimer = 0;
+  const document = {
+    activeElement: null as MenuElement | null,
+    createElement: (tag: string) => new MenuElement(tag),
+    querySelector: (selector: string) => root.querySelector(selector),
+    addEventListener() {}, removeEventListener() {},
+  };
+  class MenuElement {
+    children: MenuElement[] = [];
+    parent: MenuElement | null = null;
+    className = "";
+    textContent = "";
+    innerHTML = "";
+    type = "";
+    style = {};
+    dataset: Record<string, string> = {};
+    attributes: Record<string, string> = {};
+    listeners: Record<string, ((event: any) => void)[]> = {};
+    constructor(public tagName: string) {}
+    appendChild(child: MenuElement) { child.parent = this; this.children.push(child); return child; }
+    setAttribute(name: string, value: string) {
+      this.attributes[name] = value;
+      if (name === "data-msg-id") this.dataset.msgId = value;
+    }
+    querySelector(selector: string): MenuElement | null {
+      // innerHTML parsing is not needed here, except for the voice play control.
+      if (selector === ".voice-play-btn") return new MenuElement("button");
+      for (const child of this.children) {
+        if (selector.startsWith(".") && child.className.split(" ").includes(selector.slice(1))) return child;
+        const nested = child.querySelector(selector);
+        if (nested) return nested;
+      }
+      return null;
+    }
+    contains(node: MenuElement | null): boolean { return node === this || this.children.some(child => child.contains(node)); }
+    addEventListener(name: string, callback: (event: any) => void) { (this.listeners[name] ||= []).push(callback); }
+    fire(name: string, fields: Record<string, unknown> = {}) {
+      const event = { target: this, currentTarget: this, defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...fields };
+      for (const listener of this.listeners[name] || []) listener(event);
+      return event;
+    }
+    focus() { document.activeElement = this; }
+    remove() {
+      if (this.contains(document.activeElement)) document.activeElement = root;
+      if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+      this.parent = null;
+    }
+  }
+  const root = new MenuElement("body");
+  document.activeElement = root;
+  const build = new Function("document", "messagesEl", "setTimeout", "clearTimeout", `
+    const window = {}, messageIds = new Set(), keptEntries = [];
+    let lastSeenTs = null;
+    const safeMsgId = value => value, safeMediaUrl = value => value;
+    const renderMarkdown = value => value, escapeHtml = value => value, escapeAttr = value => value;
+    const withMedia = value => value, t = value => value;
+    const atBottom = () => true, scrollToBottom = () => {};
+    const EMOJIS = [{ char: "❤️" }, { char: "👍" }];
+    ${section('  function createMessageBubble(', '  function formatDuration(')}
+    ${section('  function keptButton(', '  async function keptRequest(')}
+    ${section('  function showEmojiPicker(', '  window.sendReaction =')}
+    return { addMessage, addVoiceMessage };
+  `)(document, root,
+    (callback: () => void, ms: number) => { timers.set(++nextTimer, { callback, ms }); return nextTimer; },
+    (id: number) => timers.delete(id));
+  if (voice) build.addVoiceMessage("user", "", null, "voice-id", "/audio/test.webm");
+  else build.addMessage("user", "hello", null, "text-id");
+  const bubble = root.children[0];
+  return {
+    document, bubble, action: bubble.querySelector(".message-actions")!,
+    picker: () => bubble.querySelector(".emoji-picker")!,
+    longPress() {
+      bubble.fire("touchstart", { touches: [{}] });
+      const press = [...timers.values()].filter(timer => timer.ms === 500);
+      expect(press).toHaveLength(1);
+      press[0].callback();
+      bubble.fire("touchend");
+    },
+  };
+}
+
+for (const voice of [false, true]) {
+  const kind = voice ? "voice" : "text";
+  test(`${kind} menu: long press and right click do not take focus, even after keyboard use`, () => {
+    const ui = messageMenuHarness(voice);
+    ui.action.focus();
+    ui.longPress();
+    expect(ui.picker()).not.toBeNull();
+    expect(ui.picker().contains(ui.document.activeElement)).toBe(false);
+    expect(ui.document.activeElement).toBe(ui.action);
+    // A new pointer-opened picker must not inherit the old keyboard focus.
+    ui.action.fire("click", { detail: 0 });
+    expect(ui.document.activeElement).toBe(ui.picker().children[0]);
+    expect(ui.bubble.fire("contextmenu", { button: 2, detail: 0 }).defaultPrevented).toBe(true);
+    expect(ui.picker().contains(ui.document.activeElement)).toBe(false);
+    ui.longPress();
+    expect(ui.picker().contains(ui.document.activeElement)).toBe(false);
+  });
+
+  test(`${kind} menu: mouse, touch and pen action clicks leave focus outside the menu`, () => {
+    const ui = messageMenuHarness(voice);
+    ui.action.focus();
+    for (const event of [{ detail: 1 }, { detail: 1, pointerType: "mouse" },
+      { detail: 1, pointerType: "touch" }, { detail: 1, pointerType: "pen" },
+      { detail: 0, pointerType: "touch" }]) {
+      ui.action.fire("click", event);
+      expect(ui.picker()).not.toBeNull();
+      expect(ui.picker().contains(ui.document.activeElement)).toBe(false);
+      expect(ui.document.activeElement).toBe(ui.action);
+    }
+  });
+
+  test(`${kind} menu: native Enter/Space activation focuses first button; Tab stays native; Escape returns focus`, () => {
+    const ui = messageMenuHarness(voice);
+    for (const key of ["Enter", " "]) {
+      ui.action.focus();
+      expect(ui.action.fire("keydown", { key }).defaultPrevented).toBe(false);
+      // The native button emits this click for either activation key.
+      ui.action.fire("click", { detail: 0, pointerType: "" });
+      const picker = ui.picker();
+      expect(ui.document.activeElement).toBe(picker.children[0]);
+      expect(picker.children.map(button => button.textContent)).toEqual(["❤️", "👍", "↩", "⧉", "¶", "🔖"]);
+      for (const button of picker.children) {
+        expect(button.tagName).toBe("button");
+        expect(button.attributes.tabindex).toBeUndefined();
+        expect(button.attributes.disabled).toBeUndefined();
+      }
+      expect(picker.fire("keydown", { key: "Tab" }).defaultPrevented).toBe(false);
+      expect(picker.fire("keydown", { key: "Tab", shiftKey: true }).defaultPrevented).toBe(false);
+      picker.children.at(-1)!.focus();
+      picker.fire("keydown", { key: "Escape" });
+      expect(ui.picker()).toBeNull();
+      expect(ui.document.activeElement).toBe(ui.action);
+    }
+    expect(declarations(".emoji-picker button:focus-visible")).toMatchObject({
+      outline: "2px solid currentColor", "outline-offset": "2px",
+    });
+  });
+}
 
 test("the detail view uses chat Markdown and the existing copy handler without live message IDs", () => {
   const detail = section("  function renderKeptEntry(", "  async function removeKept(");

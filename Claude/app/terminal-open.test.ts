@@ -94,19 +94,20 @@ class FakeNode {
 
 class FakeScroll extends FakeNode {
   clientHeight = VIEW;
+  hint: FakeNode | null = null;
   /** Layout that settles after a frame (a panel still sliding in), without a scroll event. */
   late = 0;
   private top = 0;
   constructor(private output: FakeNode) { super("div"); }
-  get scrollHeight() { return Math.max(VIEW, LINE + this.output.height + this.late); }
-  get scrollTop() { return Math.min(this.top, this.scrollHeight - VIEW); }
-  set scrollTop(v: number) { this.top = Math.max(0, Math.min(v, this.scrollHeight - VIEW)); }
-  get atNewest() { return this.scrollTop === this.scrollHeight - VIEW; }
+  get scrollHeight() { return Math.max(this.clientHeight, LINE + this.output.height + this.late + (this.hint?.textContent ? 12 : 0)); }
+  get scrollTop() { return Math.min(this.top, this.scrollHeight - this.clientHeight); }
+  set scrollTop(v: number) { this.top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight)); }
+  get atNewest() { return this.scrollTop === this.scrollHeight - this.clientHeight; }
 }
 
 const items = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => ({ key: `k${from + i}`, html: `line ${from + i}` }));
 
-function harness() {
+export function harness(mode = "log") {
   const output = new FakeNode("pre");
   const scroll = new FakeScroll(output);
   const panel = new FakeNode("div");
@@ -125,9 +126,10 @@ function harness() {
   };
   const sent: any[] = [];
   const ws = { readyState: 1, send: (data: string) => sent.push(JSON.parse(data)) };
-  const fetches: { url: string; resolve: (data: unknown) => void }[] = [];
-  const fetch = (url: string) => new Promise((resolve) => {
-    fetches.push({ url, resolve: (data) => resolve({ ok: true, json: async () => data }) });
+  const fetches: { url: string; resolve: (data: unknown) => void; fail: () => void; reject: () => void }[] = [];
+  const fetch = (url: string) => new Promise((resolve, reject) => {
+    fetches.push({ url, resolve: (data) => resolve({ ok: true, json: async () => data }),
+      fail: () => resolve({ ok: false, status: 503 }), reject: () => reject(new Error("Network unavailable")) });
   });
   let frames: (() => void)[] = [];
   const requestAnimationFrame = (fn: () => void) => { frames.push(fn); return frames.length; };
@@ -147,12 +149,13 @@ function harness() {
     { ws }, { OPEN: 1 }, document, fetch, requestAnimationFrame, () => 0, () => 0, t, () => true, { warn: () => {}, log: () => {} },
   ) as { openTerminal: () => void; closeTerminal: () => void; renderTerminalFrame: (msg: unknown) => void };
 
-  const frame = (tail: { html: string }[]) => app.renderTerminalFrame({ type: "terminal-frame", mode: "log", items: tail, tail_count: tail.length, ts: new Date().toISOString() });
+  if (mode === "tui") byId("terminal-mode-btn").fire("click");
+  const frame = (tail: { html: string }[]) => app.renderTerminalFrame({ type: "terminal-frame", mode, items: tail, lines: tail.map(item => item.html), tail_count: tail.length, ts: new Date().toISOString() });
   const paint = () => { const due = frames; frames = []; for (const fn of due) fn(); };
   /** The reader drags the view to a position; the browser reports the scroll. */
   const readTo = (top: number) => { scroll.fire("touchstart"); scroll.scrollTop = top; scroll.fire("scroll"); };
   const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
-  return { app, output, scroll, panel, sent, fetches, frame, paint, readTo, settle };
+  return { app, output, scroll, panel, sent, fetches, frame, paint, readTo, settle, byId };
 }
 
 describe("opening the terminal panel", () => {

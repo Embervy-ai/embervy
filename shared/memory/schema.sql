@@ -196,6 +196,19 @@ CREATE TABLE IF NOT EXISTS daemon_runs (
 
 CREATE INDEX IF NOT EXISTS idx_daemon_runs_started ON daemon_runs(started_at DESC);
 
+-- Dream attempt outcomes only; never provider text, prompts or credentials.
+-- Created automatically by the dream worker; migrations/003_dream_runs.sql is optional.
+CREATE TABLE IF NOT EXISTS dream_runs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at    TEXT NOT NULL,
+  result        TEXT NOT NULL CHECK (result IN ('ok', 'failed', 'empty')),
+  error_code    TEXT CHECK (error_code IN ('provider_http', 'provider_unreachable', 'provider_response', 'write_failed', 'unexpected')),
+  error_status  INTEGER CHECK (error_status BETWEEN 100 AND 599),
+  CHECK ((result = 'failed' AND error_code IS NOT NULL) OR
+         (result IN ('ok', 'empty') AND error_code IS NULL AND error_status IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_dream_runs_started ON dream_runs(started_at DESC, id DESC);
+
 -- ===========================================================================
 -- consolidation_proposals — pending consolidations awaiting 2-night confirmation
 -- (Patch 2: only applied if proposed in two consecutive runs)
