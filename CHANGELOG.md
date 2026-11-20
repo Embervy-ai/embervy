@@ -2,6 +2,33 @@
 
 Embervy uses [semantic versioning](https://semver.org/). The current version is in `VERSION`. Installed houses receive updates as letters, and every letter names the changes it carries.
 
+## 1.0.3 (2026-11-20)
+
+### Brain
+
+- A head attached directly to Brain (`BRAIN_GPT_TRANSPORT=api` and the other API heads) now receives pictures sent in the app; this is tested with ChatGPT. The picture travels with the turn in which it was sent, stays through that turn's tool calls, and is not kept in the next turn, the bridge or the archive. On by default; `BRAIN_APP_IMAGES=off` turns it off. With it on, a picture sent in the app goes to the model provider of that head. A failed picture turn reports a fixed code, phase and HTTP status, never provider text.
+- The ChatGPT adapter passes picture parts on both of its routes and answers a refused picture with fixed codes. A house that runs ChatGPT directly on Brain updates Brain and the adapter together and restarts the adapter.
+- A house without the approval card system (`BRAIN_PIPE_PERMISSION=none`, no approval settings file) may write its own skills under `.claude/skills`; everything else that would ask is still refused. A house that has the card system and runs it at level `none` could already do this through the ordinary path.
+- The heads menu says when each provider's model list was last fetched, names the class of a failed fetch, and warns when the selected model is no longer offered. The model is never changed for you.
+- A Kimi head without a key can be set up from the Brain menu of the app.
+
+### Memory
+
+- Model, output budget and timeout of the nightly memory worker and of the dream worker are settings (`DAEMON_LLM_MODEL`, `DAEMON_MAX_TOKENS`, `DAEMON_TIMEOUT_MS`, `DREAM_LLM_MODEL`, `DREAM_MAX_TOKENS`, `DREAM_TIMEOUT_MS`), described in one place in `shared/memory/README.md` under “Changing the night model”. Memory health shows the nightly worker's values in effect and the product version the worker was built from; the dream worker's values are not shown there yet.
+- A failed nightly run stores and shows a fixed class and status instead of provider text. Rows recorded before this version are shown as withheld. Health warns when the last dream run failed.
+- The doctor names the setting to change when the configured model is rejected, times out or answers unusably.
+- Both workers need a fresh deploy to take this version.
+
+### Handbook
+
+- A new paragraph says that the house is the agent's to build on, with a copy and a way back, and how household wishes are handled.
+
+### App
+
+- Name, title font and background image settings now belong to the house and follow the user across devices. Colors and opacity remain device-local; “Use the house look” resets those colors without deleting shared appearance. Existing device choices migrate only into a house with no saved version. Private server storage keeps the image separately from metadata and commits updates atomically.
+- Chat, terminal logs, Kept and doctor hints now use one two-digit 24-hour clock in the house time zone. Date parts and number formatting still follow the interface language.
+- Claude Code houses: an answered permission card no longer sticks below the newest message after every reload. A closed card keeps the time it was closed and sits at that place in the conversation; closed cards without a time are not shown, and the history keeps the latest 50 for at most 14 days.
+
 ## 1.0.2 (2026-11-18)
 
 ### Repairs

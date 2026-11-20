@@ -14,11 +14,31 @@ export interface ModelInfo {
 }
 
 export type CatalogReadMode = "cached" | "refresh" | "memory";
+export const CATALOG_TTL_MS = 6 * 3_600_000;
+export type CatalogFailureClass = "auth" | "network" | "http" | "unavailable";
+export interface CatalogFailure { kind: CatalogFailureClass; status?: number }
+export interface CatalogState {
+  updatedAt: number | null;
+  ttlMs: number;
+  stale: boolean;
+  lastFailure: CatalogFailure | null;
+}
+export type CatalogStates = Partial<Record<string, CatalogState>>;
+type FailureReporter = (failure: CatalogFailure) => void;
+interface ProbeOptions { timeoutMs?: number; fetchImpl?: typeof fetch; onFailure?: FailureReporter }
+
+// Copy only closed diagnostic fields, never exceptions, response bodies, or credentials.
+function safeFailure(failure: CatalogFailure): CatalogFailure {
+  const kind = ["auth", "network", "http", "unavailable"].includes(failure.kind) ? failure.kind : "unavailable";
+  const status = failure.status;
+  return { kind, ...(Number.isInteger(status) && status! >= 100 && status! <= 599 ? { status } : {}) };
+}
 
 /** Shared by menu and terminal reads so refresh limits cannot be bypassed by switching callers. */
 export class ModelCatalogCache {
   private readonly entries = new Map<string, { at: number; models: ModelInfo[] }>();
   private readonly running = new Map<string, Promise<ModelInfo[] | null>>();
+  private readonly failures = new Map<string, CatalogFailure>();
   private lastRefreshAt: number | null = null;
   private lastUpdatedAt: number | null = null;
 
@@ -41,20 +61,33 @@ export class ModelCatalogCache {
 
   peek(key: string): ModelInfo[] | null { return this.entries.get(key)?.models ?? null; }
 
-  async get(key: string, probe: () => Promise<ModelInfo[] | null>, mode: CatalogReadMode = "cached"): Promise<ModelInfo[] | null> {
+  state(key: string): CatalogState {
+    const updatedAt = this.entries.get(key)?.at ?? null;
+    const failure = this.failures.get(key);
+    return { updatedAt, ttlMs: CATALOG_TTL_MS, stale: updatedAt === null || this.now() - updatedAt >= CATALOG_TTL_MS,
+      lastFailure: failure ? { ...failure } : null };
+  }
+
+  async get(key: string, probe: (fail: FailureReporter) => Promise<ModelInfo[] | null>, mode: CatalogReadMode = "cached"): Promise<ModelInfo[] | null> {
     const hit = this.entries.get(key);
-    if (mode === "cached" && hit && this.now() - hit.at < 6 * 3_600_000) return hit.models;
+    if (mode === "cached" && hit && this.now() - hit.at < CATALOG_TTL_MS) return hit.models;
     const running = this.running.get(key);
     if (running) return running;
     // A throttled refresh must not turn an expired or missing entry into another probe.
     if (mode === "memory") return hit?.models ?? null;
-    const promise = Promise.resolve().then(probe).then((models) => {
-      if (!models?.length) return hit?.models ?? null;
+    let failure: CatalogFailure = { kind: "unavailable" };
+    const failed = () => {
+      this.failures.set(key, failure);
+      return hit?.models ?? null;
+    };
+    const promise = Promise.resolve().then(() => probe((value) => { failure = safeFailure(value); })).then((models) => {
+      if (!models?.length) return failed();
       const at = this.now();
       this.entries.set(key, { at, models });
+      this.failures.delete(key);
       this.lastUpdatedAt = at;
       return models;
-    }).catch(() => hit?.models ?? null).finally(() => {
+    }).catch(failed).finally(() => {
       if (this.running.get(key) === promise) this.running.delete(key);
     });
     this.running.set(key, promise);
@@ -167,18 +200,28 @@ export function modelsListRequest(head: { name: string; endpoint: string; apiKey
   return null;
 }
 
-export async function probeListModels(request: { url: string; token: string }, opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {}): Promise<ModelInfo[] | null> {
+async function probeHttpModels(url: string, headers: Record<string, string>, parse: (body: unknown) => ModelInfo[] | null, opts: ProbeOptions): Promise<ModelInfo[] | null> {
+  let res: Response;
   try {
-    const res = await (opts.fetchImpl ?? fetch)(request.url, {
-      headers: { authorization: `Bearer ${request.token}`, accept: "application/json" },
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
-    });
-    if (!res.ok) return null;
-    const models = modelsFromListBody(await res.json());
-    return models?.length ? models : null;
+    res = await (opts.fetchImpl ?? fetch)(url, { headers, signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) });
   } catch {
+    opts.onFailure?.({ kind: "network" });
     return null;
   }
+  if (!res.ok) {
+    opts.onFailure?.({ kind: res.status === 401 || res.status === 403 ? "auth" : "http", status: res.status });
+    return null;
+  }
+  try {
+    const models = parse(await res.json());
+    if (models?.length) return models;
+  } catch { /* Invalid catalog bodies are not diagnostics. */ }
+  opts.onFailure?.({ kind: "unavailable", status: res.status });
+  return null;
+}
+
+export async function probeListModels(request: { url: string; token: string }, opts: ProbeOptions = {}): Promise<ModelInfo[] | null> {
+  return probeHttpModels(request.url, { authorization: `Bearer ${request.token}`, accept: "application/json" }, modelsFromListBody, opts);
 }
 
 // A low client version silently hides newer models; the high value avoids that filter.
@@ -202,22 +245,18 @@ export function modelsFromGptBody(body: unknown): ModelInfo[] | null {
     });
 }
 
-export async function probeGptModels(authFile: string, opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {}): Promise<ModelInfo[] | null> {
+export async function probeGptModels(authFile: string, opts: ProbeOptions = {}): Promise<ModelInfo[] | null> {
+  let tok: any;
   try {
     const raw = JSON.parse(readFileSync(authFile, "utf8"));
-    const tok = raw?.tokens ?? raw;
-    if (typeof tok?.access_token !== "string" || typeof tok?.account_id !== "string") return null;
-    const res = await (opts.fetchImpl ?? fetch)(GPT_MODELS_URL, {
-      headers: {
-        authorization: `Bearer ${tok.access_token}`, "chatgpt-account-id": tok.account_id,
-        "OpenAI-Beta": "responses=experimental", originator: "codex_cli_rs", accept: "application/json",
-      },
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
-    });
-    if (!res.ok) return null;
-    const models = modelsFromGptBody(await res.json());
-    return models?.length ? models : null;
+    tok = raw?.tokens ?? raw;
+    if (typeof tok?.access_token !== "string" || !tok.access_token || typeof tok?.account_id !== "string" || !tok.account_id) throw new Error();
   } catch {
+    opts.onFailure?.({ kind: "auth" });
     return null;
   }
+  return probeHttpModels(GPT_MODELS_URL, {
+    authorization: `Bearer ${tok.access_token}`, "chatgpt-account-id": tok.account_id,
+    "OpenAI-Beta": "responses=experimental", originator: "codex_cli_rs", accept: "application/json",
+  }, modelsFromGptBody, opts);
 }

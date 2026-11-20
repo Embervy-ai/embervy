@@ -13,8 +13,10 @@ import { join } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { positiveFiniteSetting } from "./security-config";
 import { websocketOriginAllowed } from "./ws-origin";
+import { HouseLookStore, HouseLookInputError, readLookBody, MAX_LOOK_BODY_BYTES } from "./house-look";
 import { parseEnv } from "../../shared/scripts/env-file";
 import { withCredentialLock, writePrivateText } from "../../shared/scripts/credential-store";
+import { KeySetupError, keySetupHead, saveHeadKey } from "./brain-key-setup";
 import { createHash, timingSafeEqual as bufferTimingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { boundedRequest, REQUEST_BODY_MAX } from "./request-body";
@@ -979,6 +981,14 @@ app.use("*", async (c, publicNext) => {
     }
   };
 
+  // House appearance requires the same human cookie as private settings, including locally.
+  if (path === "/api/house-look" || path.startsWith("/api/house-look/")) {
+    c.header("Cache-Control", "private, no-store");
+    if (!await isHumanSession(c)) return c.json({ error: "unauthorized" }, 401);
+    if (!websocketOriginAllowed(c.req.raw, calendarConfig.publicUrl)) return c.json({ error: "Forbidden origin" }, 403);
+    return next();
+  }
+
   // Kept belongs to the person, even in local/dev mode; the agent has only an append door.
   if (path === "/api/kept" || path.startsWith("/api/kept/")) {
     if (!await isHumanSession(c)) return c.json({ error: S("kept.unauthorized") }, 401);
@@ -1013,7 +1023,7 @@ app.use("*", async (c, publicNext) => {
 
   // Muting is a human decision, and so is signing the server in to a Claude
   // account: neither the agent bearer nor local/dev trust suffices.
-  if (path === "/api/doctor/mute" || path.startsWith("/api/brain/claude-signin/") || path.startsWith("/api/brain/chatgpt-signin/")) {
+  if (path === "/api/doctor/mute" || path.startsWith("/api/brain/claude-signin/") || path.startsWith("/api/brain/chatgpt-signin/") || path.startsWith("/api/brain/key-setup/")) {
     if (!APP_SESSION_SECRET) return c.json({ error: "unauthorized" }, 401);
     const authenticated = await isAuthenticatedFromCookie(c.req.header("cookie") || "").catch(() => false);
     if (!authenticated) return c.json({ error: "unauthorized" }, 401);
@@ -1127,9 +1137,25 @@ const EMBERVY_HOME_DIR = envValue("EMBERVY_HOME") || process.cwd().replace(/\/Cl
 const HOUSE_QUESTION_FILE = join(EMBERVY_HOME_DIR, "state", "house-question.json");
 const HOUSE_ANSWER_FILE = join(EMBERVY_HOME_DIR, "state", "house-question-answer.json");
 const HOUSE_QUESTION_HISTORY_FILE = join(EMBERVY_HOME_DIR, "state", "house-question-history.json");
-type HouseQuestion = { id: string; instance?: string; permission?: true; submitted?: boolean; answerLabel?: string; closed?: true; text: string; options: { number: number; label: string }[]; enter?: true; readonly?: true; deadlineAt?: number; expiresAt: number };
+type HouseQuestion = { id: string; instance?: string; permission?: true; submitted?: boolean; answerLabel?: string; closed?: true; ts?: string; text: string; options: { number: number; label: string }[]; enter?: true; readonly?: true; deadlineAt?: number; expiresAt: number };
+const HOUSE_QUESTION_HISTORY_LIMIT = 50;
+const HOUSE_QUESTION_HISTORY_MAX_AGE = 14 * 86400000;
+function retainHouseQuestionHistory(history: HouseQuestion[]): HouseQuestion[] {
+  const cutoff = Date.now() - HOUSE_QUESTION_HISTORY_MAX_AGE;
+  const dated = history.filter(q => q.closed && typeof q.ts === "string" && Number.isFinite(Date.parse(q.ts)));
+  const retainedClosures = new Set(dated.filter(q => Date.parse(q.ts!) >= cutoff)
+    .sort((a, b) => Date.parse(a.ts!) - Date.parse(b.ts!)).slice(-HOUSE_QUESTION_HISTORY_LIMIT));
+  const managed = new Set(dated);
+  // Undated legacy records remain readable and untouched; only dated closures expire.
+  return history.filter(q => !managed.has(q) || retainedClosures.has(q));
+}
 function readHouseQuestionHistory(): HouseQuestion[] {
-  try { return JSON.parse(readFileSync(HOUSE_QUESTION_HISTORY_FILE, "utf8")); } catch { return []; }
+  let history: HouseQuestion[];
+  try { history = JSON.parse(readFileSync(HOUSE_QUESTION_HISTORY_FILE, "utf8")); } catch { return []; }
+  if (!Array.isArray(history)) return [];
+  const retained = retainHouseQuestionHistory(history);
+  if (retained.length !== history.length) writeHouseQuestionState(HOUSE_QUESTION_HISTORY_FILE, retained);
+  return retained;
 }
 function readHouseQuestion(includeExpired = false): HouseQuestion | null {
   let q: HouseQuestion;
@@ -1145,7 +1171,7 @@ function closeHouseQuestion(q: HouseQuestion | null) {
   if (q?.permission === true) {
     const history = readHouseQuestionHistory();
     if (!history.some(old => old.id === q.id && old.instance === q.instance)) {
-      writeHouseQuestionState(HOUSE_QUESTION_HISTORY_FILE, [...history, { ...q, closed: true }]);
+      writeHouseQuestionState(HOUSE_QUESTION_HISTORY_FILE, retainHouseQuestionHistory([...history, { ...q, closed: true, ts: new Date(Date.now()).toISOString() }]));
     }
   }
   clearHouseQuestion();
@@ -1167,7 +1193,7 @@ function clearHouseQuestion() {
 }
 function validHouseQuestion(q: any): boolean {
   if (q && "instance" in q && (typeof q.instance !== "string" || q.instance !== q.instance.trim() || !/^[a-zA-Z0-9-]{1,80}:[1-9][0-9]{0,12}$/.test(q.instance))) return false;
-  if (q && ["submitted", "closed", "answerLabel", "expiresAt"].some(key => key in q)) return false;
+  if (q && ["submitted", "closed", "answerLabel", "expiresAt", "ts"].some(key => key in q)) return false;
   if (q && "deadlineAt" in q && (q.permission !== true || !Number.isSafeInteger(q.deadlineAt) || q.deadlineAt <= 0)) return false;
   if (q?.permission === true && !q.instance) return false;
   if (!q || typeof q.text !== "string" || !q.text || q.text.length > 12000 || !Array.isArray(q.options) || q.options.length > 29) return false;
@@ -1595,6 +1621,26 @@ app.post("/api/brain/claude-signin/code", async (c) => {
     claudeAttempt = null;
     return c.json({ error: S("claudeAuth.error.finishFailed") }, 502);
   } finally { claudeSignInBusy = false; }
+});
+
+function headKeyError(c: any, error: unknown) {
+  const code = error instanceof KeySetupError ? error.code : "storage";
+  switch (code) {
+    case "invalid": return c.json({ ok: false, error: S("brainMenu.key.error.invalid") }, 400);
+    case "rejected": return c.json({ ok: false, error: S("brainMenu.key.error.rejected") }, 400);
+    case "unchecked": return c.json({ ok: false, error: S("brainMenu.key.error.unchecked") }, 502);
+    default: return c.json({ ok: false, error: S("brainMenu.key.error.storage") }, 500);
+  }
+}
+app.post("/api/brain/key-setup/:head/save", async (c) => {
+  c.header("Cache-Control", "no-store");
+  const head = c.req.param("head");
+  if (!BRAIN_HARNESS || !keySetupHead(head)) return c.json({ error: "not found" }, 404);
+  try {
+    const body = await c.req.json().catch(() => null);
+    await saveHeadKey(BRAIN_ENV_FILES[0]!, head, body?.key);
+    return c.json({ ok: true, effective: S("brainMenu.key.saved") });
+  } catch (error) { return headKeyError(c, error); }
 });
 
 let chatgptAttempt: { attempt: ChatGptSignInAttempt; at: number } | null = null;
@@ -3247,6 +3293,31 @@ app.post("/api/internal/voice-broadcast", async (c) => {
   }
 });
 
+const houseLook = new HouseLookStore(DATA_DIR);
+app.get("/api/house-look", (c) => {
+  try { return c.json({ look: houseLook.publicLook() }); }
+  catch { return c.json({ error: "House appearance unavailable" }, 500); }
+});
+for (const route of ["/api/house-look", "/api/house-look/migrate"]) {
+  app.post(route, async (c) => {
+    try {
+      const look = houseLook.write(await readLookBody(c.req.raw), route.endsWith("/migrate"));
+      return c.json({ look: houseLook.publicLook(look) });
+    } catch (error) {
+      return c.json({ error: error instanceof HouseLookInputError ? error.message : "House appearance could not be saved" }, error instanceof HouseLookInputError ? 400 : 500);
+    }
+  });
+}
+app.get("/api/house-look/photo", (c) => {
+  try {
+    const photo = houseLook.photo(c.req.query("v") || "");
+    if (!photo) return c.notFound();
+    c.header("Content-Type", photo.type);
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.body(photo.bytes);
+  } catch { return c.json({ error: "House photo unavailable" }, 500); }
+});
+
 // Per-session product setting. The server owns the effective state; client
 // messages and query parameters are never trusted as authorization.
 app.get("/api/terminal/settings", (c) => {
@@ -3367,7 +3438,7 @@ app.get("/api/strings/version", (c) => {
 app.get("/feature-defaults.js", (c) => {
   c.header("Content-Type", "text/javascript; charset=utf-8");
   c.header("Cache-Control", "no-cache, must-revalidate");
-  return c.body(`window.embervyHouseFeatures = ${JSON.stringify(houseFeatureDefaults(EMBERVY_HOME_DIR))};\n`);
+  return c.body(`window.embervyHouseFeatures = ${JSON.stringify(houseFeatureDefaults(EMBERVY_HOME_DIR))};\nwindow.embervyHouseTimeZone = ${JSON.stringify(houseTimeZone() || null)};\n`);
 });
 
 // The pages load /strings.js?v=<fingerprint> with <html lang> set, so no cache
@@ -3407,7 +3478,7 @@ const uploadBodyLimits = new Map([
   ["/api/voice/transcribe", VOICE_MAX_BYTES],
 ]);
 // Bun has one transport ceiling; the reader enforces the smaller default before parsing.
-const transportBodyMax = Math.max(REQUEST_BODY_MAX, ...uploadBodyLimits.values());
+const transportBodyMax = Math.max(REQUEST_BODY_MAX, MAX_LOOK_BODY_BYTES, ...uploadBodyLimits.values());
 const server = Bun.serve({
   maxRequestBodySize: transportBodyMax,
   port: APP_PORT,
@@ -3445,6 +3516,12 @@ const server = Bun.serve({
     // The peer's bounded wait must finish before Bun closes the internal request.
     if (PEERS.length && url.pathname === "/api/internal/peer/send") server.timeout(req, 30);
     if (url.pathname.startsWith("/api/brain/claude-signin/")) server.timeout(req, 120);
+    // Let the 10 s provider deadline return its safe error before HTTP idles out.
+    if (url.pathname.startsWith("/api/brain/key-setup/")) server.timeout(req, 20);
+
+    // House appearance authenticates before reading and has its own streaming
+    // bound for base64 photos; the ordinary 1 MiB JSON limit is too small.
+    if (url.pathname === "/api/house-look" || url.pathname.startsWith("/api/house-look/")) return app.fetch(req);
 
     let bodyMax = REQUEST_BODY_MAX;
     const uploadMax = req.method === "POST" ? uploadBodyLimits.get(url.pathname) : undefined;

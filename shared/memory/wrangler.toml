@@ -57,6 +57,11 @@ bucket_name = "embervy-archive"
 # zone_name = "example.com"
 
 [vars]
+# See README.md: Changing the night model.
+# DAEMON_LLM_MODEL = "mistralai/mistral-medium-3-5"
+# DAEMON_MAX_TOKENS = "8000"
+# DAEMON_TIMEOUT_MS = "120000"
+# EMBERVY_DREAM = "off" # Mirror a disabled house dream for health reporting only.
 PUBLIC_URL = "https://embervy-memory.YOUR-ACCOUNT.workers.dev"
 APP_URL = "https://YOUR-APP.example.com"
 VIDEO_BACKEND_URL = ""

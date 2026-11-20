@@ -5,10 +5,12 @@
 
 import { contentRange, parseByteRange } from "./byte-range";
 import { boundedBody, invalidIntegerQuery } from "./request-input";
-import { runDaemon, runMechanicalDecay, ensureUsedColumns, cancelArchiveAttempts } from "./daemon";
+import { runDaemon, runMechanicalDecay, ensureUsedColumns, cancelArchiveAttempts, daemonSettings, daemonFailureText } from "./daemon";
 import { envValue, MEMORY_IMAGE_PATH, MEMORY_VIDEO_PATH } from "../../scripts/legacy-names";
 
 const MEMORY_VERSION = "0.3.0";
+// Kept in sync with the root VERSION by product-guards.test.ts.
+export const PRODUCT_VERSION = "1.0.3";
 
 
 export interface Env {
@@ -21,7 +23,10 @@ export interface Env {
   EMBERVY_API_KEY?: string;  
   OPENROUTER_API_KEY?: string;
   DAEMON_LLM_URL?: string;   
-  DAEMON_LLM_MODEL?: string; 
+  DAEMON_LLM_MODEL?: string;
+  DAEMON_MAX_TOKENS?: string;
+  DAEMON_TIMEOUT_MS?: string;
+  EMBERVY_DREAM?: string; // Optional mirror of the house choice for health reporting.
   PUBLIC_URL?: string;
   BFL_API_KEY?: string;       
   XAI_API_KEY?: string;       
@@ -1921,10 +1926,21 @@ async function toolHealth(env: Env) {
 
   const warnings: string[] = [];
   if (!daemonRow) warnings.push("daemon never ran");
-  else if (daemonRow.ok !== 1) warnings.push(`last daemon run failed: ${daemonRow.error_message ?? "unknown"}`);
+  else if (daemonRow.ok !== 1) warnings.push(`last daemon run failed: ${daemonFailureText(daemonRow.error_message)}`);
+  const dreamCodes = new Set(["provider_http", "provider_unreachable", "provider_response", "write_failed", "unexpected"]);
+  const dreamError = dreamAttemptRow?.error_code ? {
+    class: dreamCodes.has(dreamAttemptRow.error_code) ? dreamAttemptRow.error_code : "unexpected",
+    status: Number.isInteger(dreamAttemptRow.error_status) && dreamAttemptRow.error_status! >= 100 && dreamAttemptRow.error_status! <= 599
+      ? dreamAttemptRow.error_status : null,
+  } : null;
+  if (!/^(0|off|false|no)$/i.test(env.EMBERVY_DREAM?.trim() ?? "") && dreamAttemptRow?.result === "failed") {
+    warnings.push(`last dream attempt failed: ${dreamError?.class ?? "unexpected"}${dreamError?.status == null ? "" : ` ${dreamError.status}`}`);
+  }
 
   const out = {
     version: MEMORY_VERSION,
+    product_version: PRODUCT_VERSION,
+    ...daemonSettings(env),
     hot_count: hotCount?.n ?? 0,
     archive_count: archCount?.n ?? 0,
     unresolved_observations: openCount?.n ?? 0,
@@ -1933,8 +1949,7 @@ async function toolHealth(env: Env) {
     dream_last_run: dreamRow?.created_at ?? null,
     dream_last_attempt: dreamAttemptRow?.started_at ?? null,
     dream_last_result: dreamAttemptRow?.result ?? null,
-    dream_last_error: dreamAttemptRow?.error_code
-      ? { class: dreamAttemptRow.error_code, status: dreamAttemptRow.error_status ?? null } : null,
+    dream_last_error: dreamError,
     daemon_mode: daemonModeRow?.mode ?? "normal",
     backlog_cursor: daemonModeRow?.backlog_cursor ?? 0,
     warnings,
@@ -1942,6 +1957,8 @@ async function toolHealth(env: Env) {
 
   const lines = [
     `embervy-memory v${MEMORY_VERSION}`,
+    `Product version: ${out.product_version}`,
+    `Daemon settings: model=${out.daemon_llm_model}, max_tokens=${out.daemon_max_tokens}, timeout_ms=${out.daemon_timeout_ms}`,
     `Hot events: ${out.hot_count}`,
     `Archived events: ${out.archive_count}`,
     `Unresolved observations: ${out.unresolved_observations}`,

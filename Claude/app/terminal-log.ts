@@ -81,9 +81,9 @@ function context(options: LogOptions): Ctx {
   const labels = { ...DEFAULT_LOG_LABELS, ...(options.labels ?? {}) };
   let format: Intl.DateTimeFormat;
   try {
-    format = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, ...(options.timeZone ? { timeZone: options.timeZone } : {}) });
+    format = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", ...(options.timeZone ? { timeZone: options.timeZone } : {}) });
   } catch {
-    format = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false });
+    format = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   }
   return {
     names: options.names,

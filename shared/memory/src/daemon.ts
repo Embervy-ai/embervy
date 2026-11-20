@@ -10,10 +10,48 @@ import { eventVectorIds, ensureEdgesTable, isTemplateSurface, consolidateEvent, 
 
 const DEFAULT_LLM_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_LLM_MODEL = "mistralai/mistral-medium-3-5";
-const OPENROUTER_TIMEOUT_MS = 120_000;
+// Integer settings accept decimal digits only; bounds limit cost and invocation time.
+export function nightInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return fallback;
+  const n = Number(value.trim());
+  return Number.isSafeInteger(n) && n >= min && n <= max ? n : fallback;
+}
+export function nightModel(value: unknown, fallback = DEFAULT_LLM_MODEL): string {
+  if (typeof value !== "string") return fallback;
+  const model = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model) ? model : fallback;
+}
+export function daemonSettings(env: Pick<Env, "DAEMON_LLM_MODEL" | "DAEMON_MAX_TOKENS" | "DAEMON_TIMEOUT_MS">) {
+  return {
+    daemon_llm_model: nightModel(env.DAEMON_LLM_MODEL),
+    daemon_max_tokens: nightInteger(env.DAEMON_MAX_TOKENS, 8000, 256, 32768),
+    daemon_timeout_ms: nightInteger(env.DAEMON_TIMEOUT_MS, 120_000, 1000, 300_000),
+  };
+}
+
+// error_message contains only a fixed class/status, never exception or provider text.
+type DaemonErrorCode = "provider_http" | "provider_unreachable" | "provider_timeout" | "provider_response" | "write_failed" | "unexpected";
+class DaemonFailure extends Error {
+  constructor(readonly code: DaemonErrorCode, readonly status?: number) {
+    super(code + (status === undefined ? "" : ` ${status}`));
+  }
+}
+// Internal diagnostics belong only in this house's Worker log, never in the run trace.
+function daemonFailure(error: unknown, code: "unexpected" | "write_failed" = "unexpected"): DaemonFailure {
+  if (error instanceof DaemonFailure) return error;
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  console.error("memory daemon failed:", code, detail.slice(0, 500));
+  return new DaemonFailure(code);
+}
+const timeoutError = (error: unknown) => error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name);
+export function daemonFailureText(value: unknown): string {
+  if (typeof value === "string" && value === value.trim() && /^(provider_http(?: [1-5][0-9]{2})?|provider_unreachable|provider_timeout|provider_response(?: [1-5][0-9]{2})?|write_failed|unexpected)$/.test(value)) return value;
+  const status = typeof value === "string" ? /^OpenRouter ([1-5][0-9]{2})(?=[: ]|$)/.exec(value)?.[1] : undefined;
+  return `details withheld (recorded before 1.0.3)${status ? ` (HTTP ${status})` : ""}`;
+}
 // A rate-limited or briefly unavailable provider usually recovers within minutes.
-// Waits stay well inside the 15-minute limit of a scheduled invocation; a timeout
-// is not retried, because it already used two of those minutes.
+// Pauses are unchanged; larger configured timeouts also consume invocation time.
+// A timeout is not retried (the default already uses two minutes).
 const MODEL_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const MODEL_RETRY_PAUSES_MS = [30_000, 120_000, 300_000];
 const MODEL_RETRY_MAX_WAIT_MS = 300_000;
@@ -338,14 +376,18 @@ function moodLabelsSimilar(a: string | null | undefined, b: string | null | unde
 }
 
 
+async function daemonWrite<T>(request: () => Promise<T>): Promise<T> {
+  try { return await request(); }
+  catch (error) { throw daemonFailure(error, "write_failed"); }
+}
+
 // Keep retries local to this run so other callers do not repeat unsafe writes.
 function daemonRetryDatabase(db: Env["DB"], pause?: RetryPause): Env["DB"] {
   const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
   const fixedUpdates = new Set([
-    "UPDATE daemon_runs SET finished_at = datetime('now'), ok = 3, error_message = ? WHERE id = ?",
-    "UPDATE daemon_runs SET finished_at = datetime('now'), ok = 2, error_message = 'JSON parse failed', raw_response = ? WHERE id = ?",
-    "UPDATE daemon_runs SET raw_response = ? WHERE id = ?",
+    "UPDATE daemon_runs SET finished_at = datetime('now'), ok = 3, error_message = ?, raw_response = ? WHERE id = ?",
     "UPDATE daemon_runs SET finished_at = datetime('now'), ok = 2, error_message = ?, raw_response = ? WHERE id = ?",
+    "UPDATE daemon_runs SET raw_response = ? WHERE id = ?",
     "UPDATE daemon_runs SET finished_at = datetime('now'), mode = ?, events_seen = ?, surfaces_proposed = ?, consolidations_proposed = ?, decay_modifiers_proposed = ?, ok = 1 WHERE id = ?",
     "UPDATE mood_state SET mood_label = ?, mood_summary = ?, hot_entities = ?, active_surfaces = ?, pending_label = NULL, pending_summary = NULL, pending_entities = NULL, pending_at = NULL, updated_at = datetime('now'), source = 'daemon' WHERE id = 1",
     "UPDATE mood_state SET mood_summary = ?, hot_entities = ?, active_surfaces = ?, pending_label = NULL, pending_summary = NULL, pending_entities = NULL, pending_at = NULL, updated_at = datetime('now'), source = 'daemon' WHERE id = 1",
@@ -365,7 +407,7 @@ function daemonRetryDatabase(db: Env["DB"], pause?: RetryPause): Env["DB"] {
     const wrapped = new Proxy(native, {
       get(target, key) {
         if (key === "bind") return (...values: unknown[]) => wrap(target.bind(...values), sql, values);
-        if (key === "run") return async () => {
+        if (key === "run") return () => daemonWrite(async () => {
           if (safe(sql)) return retryD1Write(() => target.run(), { pause });
 
           let lookup: D1PreparedStatement | undefined;
@@ -399,7 +441,7 @@ function daemonRetryDatabase(db: Env["DB"], pause?: RetryPause): Env["DB"] {
               return row ? { success: true, results: [], meta: { last_row_id: Number(row.id) } } as D1Result : undefined;
             },
           });
-        };
+        });
         const value = Reflect.get(target, key, target);
         return typeof value === "function" ? value.bind(target) : value;
       },
@@ -413,7 +455,7 @@ function daemonRetryDatabase(db: Env["DB"], pause?: RetryPause): Env["DB"] {
       if (key === "batch") return (batch: D1PreparedStatement[]) => {
         const entries = batch.map(statement => statements.get(statement));
         const write = () => target.batch(batch.map((statement, i) => entries[i]?.native ?? statement));
-        return entries.every(entry => entry && safe(entry.sql)) ? retryD1Write(write, { pause }) : write();
+        return daemonWrite(() => entries.every(entry => entry && safe(entry.sql)) ? retryD1Write(write, { pause }) : write());
       };
       const value = Reflect.get(target, key, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -422,6 +464,14 @@ function daemonRetryDatabase(db: Env["DB"], pause?: RetryPause): Env["DB"] {
 }
 
 export async function runDaemon(env: Env, pause?: RetryPause, modelPause: RetryPause = waitFor): Promise<{ ok: boolean; mode: string; reason?: string }> {
+  try { return await runDaemonInternal(env, pause, modelPause); }
+  catch (error) {
+    // Preflight or failure-record writes can fail before a run can be recorded.
+    throw daemonFailure(error);
+  }
+}
+
+async function runDaemonInternal(env: Env, pause: RetryPause | undefined, modelPause: RetryPause): Promise<{ ok: boolean; mode: string; reason?: string }> {
   if (!env.OPENROUTER_API_KEY) return { ok: false, mode: "?", reason: "OPENROUTER_API_KEY missing" };
   env = { ...env, DB: daemonRetryDatabase(env.DB, pause) };
 
@@ -436,6 +486,7 @@ export async function runDaemon(env: Env, pause?: RetryPause, modelPause: RetryP
     `INSERT INTO daemon_runs (mode, ok) VALUES ('?', 0)`,
   ).run();
   const runId = Number(runStart.meta.last_row_id);
+  let failedResponse: string | null = null;
 
   try {
     await retryConsolidations(env);
@@ -494,46 +545,45 @@ export async function runDaemon(env: Env, pause?: RetryPause, modelPause: RetryP
     const mode: "normal" | "backlog" = "normal";
     const prompt = buildPrompt(input, mode, (env as any).AGENT_NAME || "the agent");
 
-    const { response: llmResp, attempts } = await callModelWithRetry(() => fetch(env.DAEMON_LLM_URL || DEFAULT_LLM_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: env.DAEMON_LLM_MODEL || DEFAULT_LLM_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-        temperature: 0.4,
-        max_tokens: 8000,
-      }),
-      signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
-    }), modelPause);
+    const settings = daemonSettings(env);
+    const { response: llmResp } = await callModelWithRetry(async () => {
+      const signal = AbortSignal.timeout(settings.daemon_timeout_ms);
+      try {
+        return await fetch(env.DAEMON_LLM_URL || DEFAULT_LLM_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: settings.daemon_llm_model,
+            messages: [{ role: "user", content: prompt }],
+            response_format: { type: "json_object" },
+            temperature: 0.4,
+            max_tokens: settings.daemon_max_tokens,
+          }),
+          signal,
+        });
+      } catch (error) {
+        throw new DaemonFailure(signal.aborted || timeoutError(error) ? "provider_timeout" : "provider_unreachable");
+      }
+    }, modelPause);
 
-    if (!llmResp.ok) {
-      const errText = await llmResp.text();
-      const tries = attempts > 1 ? ` after ${attempts} attempts` : "";
-      await env.DB.prepare(
-        `UPDATE daemon_runs SET finished_at = datetime('now'), ok = 3, error_message = ? WHERE id = ?`,
-      )
-        .bind(`OpenRouter ${llmResp.status}${tries}: ${errText.slice(0, 500)}`, runId)
-        .run();
-      return { ok: false, mode, reason: `OpenRouter ${llmResp.status}` };
-    }
+    // HTTP error bodies are provider diagnostics: never read or store them.
+    // Model content from a successful response is the house's own output and may
+    // be retained privately to diagnose truncated JSON or invalid proposals.
+    if (!llmResp.ok) throw new DaemonFailure("provider_http", llmResp.status);
 
-    const llmJson = (await llmResp.json()) as any;
-    const rawText = llmJson.choices?.[0]?.message?.content ?? "";
-
+    let rawText: string = "";
     let parsed: unknown;
     try {
+      const llmJson = (await llmResp.json()) as any;
+      rawText = llmJson?.choices?.[0]?.message?.content;
+      if (typeof rawText !== "string" || !rawText.trim()) throw new Error();
       parsed = JSON.parse(rawText);
-    } catch {
-      await env.DB.prepare(
-        `UPDATE daemon_runs SET finished_at = datetime('now'), ok = 2, error_message = 'JSON parse failed', raw_response = ? WHERE id = ?`,
-      )
-        .bind(rawText.slice(0, 8000), runId)
-        .run();
-      return { ok: false, mode, reason: "JSON parse failed" };
+    } catch (error) {
+      if (typeof rawText === "string" && rawText.length) failedResponse = rawText.slice(0, 8000);
+      throw new DaemonFailure(timeoutError(error) ? "provider_timeout" : "provider_response", timeoutError(error) ? undefined : llmResp.status);
     }
 
     const llmProposed = {
@@ -545,20 +595,16 @@ export async function runDaemon(env: Env, pause?: RetryPause, modelPause: RetryP
     };
     console.log(`[daemon] LLM proposed:`, JSON.stringify(llmProposed));
 
+    const validation = validate(parsed);
+    if (!validation.ok) {
+      failedResponse = rawText.slice(0, 5000);
+      throw new DaemonFailure("provider_response", llmResp.status);
+    }
+
     const loggedResponse = `[LLM_PROPOSED]: ${JSON.stringify(llmProposed)}\n\n[RAW]:\n${rawText}`;
     await env.DB.prepare(
       `UPDATE daemon_runs SET raw_response = ? WHERE id = ?`,
     ).bind(loggedResponse.slice(0, 16000), runId).run();
-
-    const validation = validate(parsed);
-    if (!validation.ok) {
-      await env.DB.prepare(
-        `UPDATE daemon_runs SET finished_at = datetime('now'), ok = 2, error_message = ?, raw_response = ? WHERE id = ?`,
-      )
-        .bind(validation.reason, rawText.slice(0, 5000), runId)
-        .run();
-      return { ok: false, mode, reason: validation.reason };
-    }
 
 
     const out = validation.data;
@@ -849,13 +895,13 @@ export async function runDaemon(env: Env, pause?: RetryPause, modelPause: RetryP
 
     return { ok: true, mode };
   } catch (e) {
+    const failure = daemonFailure(e);
+    const ok = failure.code === "provider_response" ? 2 : 3;
     await env.DB.prepare(
-      `UPDATE daemon_runs SET finished_at = datetime('now'), ok = 3, error_message = ? WHERE id = ?`,
-    )
-      .bind(e instanceof Error ? e.message : String(e), runId)
-      .run();
-    console.error("memory daemon failed:", e);
-    return { ok: false, mode: "?", reason: "daemon failed" };
+      `UPDATE daemon_runs SET finished_at = datetime('now'), ok = ${ok}, error_message = ?, raw_response = ? WHERE id = ?`,
+    ).bind(failure.message, failure.code === "provider_response" ? failedResponse : null, runId).run();
+    console.error("memory daemon failed:", failure.message);
+    return { ok: false, mode: failure.code === "provider_http" || failure.code === "provider_response" ? "normal" : "?", reason: failure.message };
   }
 }
 

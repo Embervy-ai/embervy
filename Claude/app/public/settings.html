@@ -289,6 +289,7 @@
     <!-- COLOUR SCHEME + BACKGROUND -->
     <section class="settings-section">
       <h2 data-i18n="settings.scheme.heading">Colour scheme</h2>
+      <div class="hint" data-i18n="settings.deviceHint">Colors and opacity apply only to this device.</div>
       <button type="button" class="photo-btn" id="house-look-btn" data-i18n="settings.houseLook">Use the house look</button>
       <div class="field theme-field">
         <label data-i18n="settings.scheme.presets">Presets</label>
@@ -299,6 +300,8 @@
 
     <section class="settings-section">
       <h2 data-i18n="settings.background.heading">Background</h2>
+      <div class="hint" data-i18n="settings.sharedHint">Name, font and background image settings apply to every device in this house.</div>
+      <div class="hint" data-i18n="settings.deviceHint">Colors and opacity apply only to this device.</div>
       <div class="field">
         <label data-i18n="settings.background.type">Type</label>
         <div class="seg" id="bg-mode">
@@ -321,6 +324,7 @@
 
     <section class="settings-section">
       <h2 data-i18n="settings.text.heading">Text</h2>
+      <div class="hint" data-i18n="settings.deviceHint">Colors and opacity apply only to this device.</div>
       <div class="field">
         <label data-i18n="settings.text.color">Text color</label>
         <input type="color" id="text-color" value="#ECEFF4">
@@ -331,6 +335,7 @@
 
     <section class="settings-section">
       <h2 data-i18n="settings.frame.heading">Buttons and frame</h2>
+      <div class="hint" data-i18n="settings.deviceHint">Colors and opacity apply only to this device.</div>
       <div class="field">
         <label data-i18n="settings.frame.accent">Buttons</label>
         <input type="color" id="accent-color" value="#D4A948">
@@ -349,6 +354,7 @@
     <!-- BUBBLES -->
     <section class="settings-section">
       <h2 data-i18n="settings.bubbles.heading">Message bubbles</h2>
+      <div class="hint" data-i18n="settings.deviceHint">Colors and opacity apply only to this device.</div>
       <div class="field">
         <label data-i18n="settings.bubbles.mineColor">Mine — color</label>
         <input type="color" id="user-color" value="#D4A948">
@@ -372,6 +378,8 @@
     <!-- TITLE -->
     <section class="settings-section">
       <h2 data-i18n="settings.titleText.heading">Title</h2>
+      <div class="hint" data-i18n="settings.sharedHint">Name, font and background image settings apply to every device in this house.</div>
+      <div class="hint" data-i18n="settings.deviceHint">Colors and opacity apply only to this device.</div>
       <div class="field">
         <label data-i18n="settings.titleText.text">Text</label>
         <input type="text" id="title-text" placeholder="Name" maxlength="24" data-i18n-placeholder="settings.titleText.placeholder">
@@ -488,7 +496,8 @@
   </div>
 
   <script src="/legacy-names.js?v=3"></script>
-  <script src="/i18n.js?v=3"></script>
-  <script src="/settings.js?v=115"></script>
+  <script src="/i18n.js?v=4"></script>
+  <script src="/house-look.js?v=2"></script>
+  <script src="/settings.js?v=117"></script>
 </body>
 </html>

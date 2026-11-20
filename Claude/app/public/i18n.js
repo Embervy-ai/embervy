@@ -49,13 +49,28 @@
       });
     }
 
-    // Clock time of a message, in the configured language's format.
+    // One house clock in every language; dates still follow the UI language.
+    function timeZone() {
+      try {
+        var zone = root.embervyHouseTimeZone;
+        if (typeof zone !== "string" || !zone.trim()) return undefined;
+        new Intl.DateTimeFormat("en-GB", { timeZone: zone });
+        return zone;
+      } catch (e) { return undefined; }
+    }
     function formatTime(ts) {
       try {
-        return new Date(ts).toLocaleTimeString(language, { hour: "2-digit", minute: "2-digit" });
-      } catch (e) {
-        return "";
-      }
+        var date = new Date(ts);
+        if (Number.isNaN(date.getTime())) return "";
+        return date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: timeZone() });
+      } catch (e) { return ""; }
+    }
+    function formatDateTime(ts) {
+      try {
+        var date = new Date(ts);
+        if (Number.isNaN(date.getTime())) return "";
+        return date.toLocaleDateString(language, { dateStyle: "medium", timeZone: timeZone() }) + ", " + formatTime(ts);
+      } catch (e) { return ""; }
     }
 
     function formatNumber(n) {
@@ -68,7 +83,7 @@
 
     var version = (data && data.version) || "";
 
-    return { language: language, version: version, t: t, has: has, apply: apply, formatTime: formatTime, formatNumber: formatNumber };
+    return { language: language, version: version, t: t, has: has, apply: apply, formatTime: formatTime, formatDateTime: formatDateTime, formatNumber: formatNumber };
   }
 
   var api = create(root.EMBERVY_STRINGS);

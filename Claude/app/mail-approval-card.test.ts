@@ -167,7 +167,7 @@ test("email-approval history messages take the card path rather than the fallbac
     const atBottom = () => true, scrollToBottom = () => {}, addKeptActions = () => {};
     const refreshes = [], refreshMailApproval = id => refreshes.push(id);
     const div = { innerHTML: "", setAttribute() {}, addEventListener() {} };
-    const document = { createElement: () => div }, messagesEl = { appendChild() {} };
+    const document = { createElement: () => div }, messagesEl = { appendChild() {}, querySelectorAll: () => [] };
     ${escape}${renderer}${add}
     addMessage("assistant", "React with emoji or POST", null, "old-card", null, null, null, null, meta);
     return { html: div.innerHTML, refreshes };

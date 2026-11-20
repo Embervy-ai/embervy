@@ -151,10 +151,10 @@ test("second safe-write failure reaches the existing failed-run path", async () 
   const f = fixture();
   try {
     f.rules.push({ sql: RAW, nth: [1, 2], message: LOST });
-    expect(await f.run()).toEqual({ ok: false, mode: "?", reason: "daemon failed" });
+    expect(await f.run()).toEqual({ ok: false, mode: "?", reason: "write_failed" });
     expect(f.count(RAW)).toBe(2);
     expect(f.row().ok).toBe(3);
-    expect(f.row().error_message).toBe(LOST);
+    expect(f.row().error_message).toBe("write_failed");
     expect(f.row().finished_at).not.toBeNull();
     expect(f.pauses).toHaveLength(1);
     expect(f.modelCalls).toBe(1);
@@ -200,7 +200,7 @@ for (const insert of inserts) {
     try {
       f.rules.push({ sql: insert.sql, nth: [1, 2], message: LOST });
       if (insert.table === "daemon_runs") {
-        await expect(f.run()).rejects.toThrow(LOST);
+        await expect(f.run()).rejects.toThrow("write_failed");
         expect(f.modelCalls).toBe(0);
       } else {
         expect((await f.run()).ok).toBe(false);
@@ -213,7 +213,7 @@ for (const insert of inserts) {
     const f = fixture(insert.payload);
     try {
       f.rules.push({ sql: insert.sql, nth: [1], message: "no such table" });
-      if (insert.table === "daemon_runs") await expect(f.run()).rejects.toThrow("no such table");
+      if (insert.table === "daemon_runs") await expect(f.run()).rejects.toThrow("write_failed");
       else expect((await f.run()).ok).toBe(false);
       expect(f.count(insert.sql)).toBe(1);
       expect(f.pauses).toHaveLength(0);
@@ -379,7 +379,7 @@ for (const kind of ["http", "json", "schema", "catch"]) {
     try {
       let sql: string;
       if (kind === "http") { f.setResponse("", 401); sql = "ok = 3, error_message = ?"; }
-      else if (kind === "json") { f.setResponse("not json"); sql = "error_message = 'JSON parse failed'"; }
+      else if (kind === "json") { f.setResponse("not json"); sql = "ok = 2, error_message = ?"; }
       else if (kind === "schema") { f.setResponse('{"mood":null}'); sql = "ok = 2, error_message = ?"; }
       else {
         f.rules.push({ sql: RAW, nth: [1], message: "no such table" });
@@ -389,6 +389,8 @@ for (const kind of ["http", "json", "schema", "catch"]) {
       expect((await f.run()).ok).toBe(false);
       expect(f.count(sql)).toBe(2);
       expect(f.row().ok).toBe(kind === "json" || kind === "schema" ? 2 : 3);
+      expect(f.row().raw_response).toBe(kind === "json" ? "not json" : kind === "schema" ? '{"mood":null}' : null);
+      expect(f.row().error_message).toBe(kind === "http" ? "provider_http 401" : kind === "catch" ? "write_failed" : "provider_response 200");
       expect(f.modelCalls).toBe(1);
     } finally { f.close(); }
   });
@@ -399,7 +401,7 @@ test("a failed failure-marker update propagates after exactly two attempts", asy
   try {
     f.rules.push({ sql: RAW, nth: [1], message: "no such table" });
     f.rules.push({ sql: "ok = 3, error_message = ?", nth: [1, 2], message: LOST });
-    await expect(f.run()).rejects.toThrow(LOST);
+    await expect(f.run()).rejects.toThrow("write_failed");
     expect(f.count("ok = 3, error_message = ?")).toBe(2);
   } finally { f.close(); }
 });
@@ -457,16 +459,16 @@ test("a busy model provider is asked again after growing pauses, and the run com
   } finally { f.close(); }
 });
 
-test("a provider that stays busy fails the run once, with the number of attempts", async () => {
+test("a provider that stays busy fails the run once, with a bounded status",  async () => {
   const f = fixture();
   try {
     f.setResponse("", 504);
     const result = await f.run();
     expect(result.ok).toBe(false);
-    expect(result.reason).toBe("OpenRouter 504");
+    expect(result.reason).toBe("provider_http 504");
     expect(f.modelCalls).toBe(4);
     expect(f.row().ok).toBe(3);
-    expect(f.row().error_message).toStartWith("OpenRouter 504 after 4 attempts: ");
+    expect(f.row().error_message).toBe("provider_http 504");
   } finally { f.close(); }
 });
 
@@ -477,7 +479,7 @@ test("other model errors are not asked again", async () => {
     expect((await f.run()).ok).toBe(false);
     expect(f.modelCalls).toBe(1);
     expect(f.modelPauses).toHaveLength(0);
-    expect(f.row().error_message).toStartWith("OpenRouter 400: ");
+    expect(f.row().error_message).toBe("provider_http 400");
   } finally { f.close(); }
 });
 

@@ -176,7 +176,10 @@ export async function callBackend(body: any, sessionId = "", retry = true, authF
       await refreshTokens(tok.access_token, authFile);
       return callBackend(body, sessionId, false, authFile);
     }
-    const completed = await readOfficialResponse(res);
+    // Keep the actual HTTP status separate from synthesized stream error statuses.
+    const completed = await readOfficialResponse(res).catch((err) => {
+      throw Object.assign(err, { providerStatus: res.status });
+    });
     for (const item of completed.output ?? []) if (item.type === "function_call") {
       officialCalls.set(`${tok.client_id}:${item.call_id}`, item);
       if (officialCalls.size > 10000) officialCalls.delete(officialCalls.keys().next().value!);
@@ -207,35 +210,53 @@ export async function callBackend(body: any, sessionId = "", retry = true, authF
     await refreshTokens(tok.access_token);
     return callBackend(body, sessionId, false);
   }
-  if (!res.ok) throw new Error(`backend HTTP ${res.status}: ${await res.text()}`);
+  try {
+    if (!res.ok) throw new Error(`backend HTTP ${res.status}: ${await res.text()}`);
 
-  // This backend sends finished items separately from response.completed's empty output.
-  const reader = res.body!.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let completed: any = null;
-  const items: any[] = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith("data:")) continue;
-      try {
-        const e = JSON.parse(line.slice(5));
-        if (e.type === "response.output_item.done" && e.item) items.push(e.item);
-        if (e.type === "response.completed") completed = e.response;
-        if (e.type === "response.failed") throw new Error(`backend response.failed: ${JSON.stringify(e).slice(0, 400)}`);
-      } catch (err) { if (err instanceof Error && err.message.startsWith("backend")) throw err; }
+    // This backend sends finished items separately from response.completed's empty output.
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let completed: any = null;
+    const items: any[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith("data:")) continue;
+        try {
+          const e = JSON.parse(line.slice(5));
+          if (e.type === "response.output_item.done" && e.item) items.push(e.item);
+          if (e.type === "response.completed") completed = e.response;
+          if (e.type === "response.failed") throw new Error(`backend response.failed: ${JSON.stringify(e).slice(0, 400)}`);
+        } catch (err) { if (err instanceof Error && err.message.startsWith("backend")) throw err; }
+      }
+      if (completed) break;
     }
-    if (completed) break;
+    if (!completed) throw new Error("stream ended without response.completed");
+    if (!(completed.output ?? []).length) completed.output = items;
+    return completed;
+  } catch (err) {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { providerStatus: res.status });
   }
-  if (!completed) throw new Error("stream ended without response.completed");
-  if (!(completed.output ?? []).length) completed.output = items;
-  return completed;
+}
+
+// Diagnostics/count estimates must never serialize image payloads as text.
+// Length means encoded URL/base64 string length, not decoded bytes or vision tokens.
+export function requestDiagnosticJson(value: any): string {
+  return JSON.stringify(value, (_key, part) => {
+    if (!part || typeof part !== "object") return part;
+    if (part.type === "input_image" || part.type === "image_url" || part.type === "image") {
+      const payload = part.type === "image" ? (part.source?.data ?? part.source?.url)
+        : typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+      return { type: part.type, length: typeof payload === "string" ? payload.length : 0 };
+    }
+    return part;
+  });
 }
 
 // Hashes let diagnostics compare prefixes without logging request content.
@@ -250,7 +271,7 @@ function fingerprint(body: any, session = ""): Fingerprint {
     tools: h(body.tools ?? []),
     toolCount: (body.tools ?? []).length,
     items: input.map((it) => h(it)),
-    chars: input.map((it) => JSON.stringify(it).length),
+    chars: input.map((it) => requestDiagnosticJson(it).length),
     kinds: input.map((it) => `${it.role ?? ""}${it.role ? "/" : ""}${it.type ?? ""}`),
   };
 }
@@ -412,10 +433,76 @@ function recallReasoning(key: string, input: any[] = []): any[] {
     ?? [];
 }
 
+// Closed vocabulary: never derive image error codes/messages from request or provider data.
+const IMAGE_ERRORS = {
+  unsupported_image_role: "Image parts are supported only in user messages (not system, assistant, tool or other roles).",
+  invalid_image_part: "User image_url parts require image_url: { url: <non-empty string> }.",
+  unsupported_image_format: "Chat Completions images must use type image_url with image_url: { url }.",
+  image_provider_error: "The image request could not be completed by the provider.",
+} as const;
+class ChatInputError extends Error {
+  constructor(public code: Exclude<keyof typeof IMAGE_ERRORS, "image_provider_error">) {
+    super(IMAGE_ERRORS[code]);
+  }
+}
+
+// Inspect the original content before conversion can reject or discard a block.
+// Anthropic tool_result content can itself contain image blocks.
+function hasImageParts(content: any): boolean {
+  return Array.isArray(content) && content.some((p: any) =>
+    p?.type === "image_url" || p?.type === "input_image" || p?.type === "image"
+    || (p?.type === "tool_result" && hasImageParts(p.content)));
+}
+export function isImageTurn(body: any): boolean {
+  if (hasImageParts(body.system)) return true;
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  let start = messages.length;
+  // Only a completing assistant ends a turn. Tool-call assistants (in either
+  // wire format) and their results remain in the same turn as the user's image.
+  while (start > 0) {
+    const message = messages[start - 1];
+    const hasToolCalls = message?.tool_calls?.length
+      || (Array.isArray(message?.content) && message.content.some((p: any) => p?.type === "tool_use"));
+    if (message?.role === "assistant" && !hasToolCalls) break;
+    start--;
+  }
+  return messages.slice(start).some((m: any) => hasImageParts(m?.content));
+}
+
+// Historical images do not suppress text-turn diagnostics. Redact before truncation
+// so a payload starting near the 300-character boundary cannot leak a short prefix.
+function errorLogText(value: unknown, historicalImages: boolean): string {
+  const message = String(value);
+  return (historicalImages ? message.replace(/[A-Za-z0-9+/=]{200,}/g, "[image base64 omitted]") : message).slice(0, 300);
+}
+
 export function chatToResponsesInput(messages: any[]): { instructions: string; input: any[] } {
   const systemParts: string[] = [];
   const input: any[] = [];
   for (const m of messages) {
+    const hasImages = Array.isArray(m.content) && m.content.some((p: any) =>
+      p?.type === "image_url" || p?.type === "input_image" || p?.type === "image");
+    // Validate before system/tool/tool-call branches can flatten or discard a picture.
+    if (hasImages && m.role !== "user") {
+      throw new ChatInputError("unsupported_image_role");
+    }
+    if (hasImages) {
+      const content = m.content.map((p: any) => {
+        if (p?.type === "image_url") {
+          if (typeof p.image_url?.url !== "string" || !p.image_url.url.trim()) {
+            throw new ChatInputError("invalid_image_part");
+          }
+          return { type: "input_image", image_url: p.image_url.url };
+        }
+        if (p?.type === "input_image" || p?.type === "image") {
+          throw new ChatInputError("unsupported_image_format");
+        }
+        return { type: "input_text", text: p?.text ?? "" };
+      });
+      input.push({ type: "message", role: "user", content });
+      continue;
+    }
+    // Keep the historical text-only wire representation, including newline joining.
     if (m.role === "system") {
       systemParts.push(typeof m.content === "string" ? m.content
         : Array.isArray(m.content) ? m.content.map((p: any) => p?.text ?? "").join("\n")
@@ -539,6 +626,7 @@ function anthropicTextOf(content: any): string {
 }
 
 export function anthropicToResponsesInput(body: any): { instructions: string; input: any[] } {
+  if (hasImageParts(body.system)) throw new ChatInputError("unsupported_image_role");
   const instructions = typeof body.system === "string"
     ? body.system
     : Array.isArray(body.system) ? body.system.map((b: any) => b.text ?? "").join("\n") : "You are a helpful assistant.";
@@ -740,10 +828,15 @@ if (import.meta.main) Bun.serve({
     const url = new URL(req.url);
     if (url.pathname === "/health") return Response.json({ ok: true, ...routeHealth(), backend: "chatgpt-oauth", model: MODEL, identity: IDENTITY, port: PORT, effort: EFFORT || null, verbosity: VERBOSITY || null, reasoning_context: REASONING_CONTEXT || null, reasoning_replay: REPLAY, web_search: WEB_SEARCH, native_web_search: NATIVE_WEB_SEARCH, quota, sticky_sessions: turnState.size, turn_state_recovery: TURN_STATE_RECOVERY ? { rotation_needed: [...recovery.values()].filter((r) => r.rotationNeeded).length, pending: [...recovery.values()].filter((r) => r.pending).length } : null });
 
+    let imageTurn = false;
+    let historicalImages = false;
     try {
       if (url.pathname === "/v1/models" && req.method === "GET") return Response.json({ object: "list", data: await adapterModels() });
       if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
         const cc = (await req.json()) as any;
+        imageTurn = isImageTurn(cc);
+        historicalImages = !imageTurn && Array.isArray(cc.messages) && cc.messages.some((m: any) => hasImageParts(m?.content));
+        if (hasImageParts(cc.system)) throw new ChatInputError("unsupported_image_role");
         const { instructions, input } = chatToResponsesInput(cc.messages ?? []);
         const body: any = {
           model: MODEL, instructions, input,
@@ -761,8 +854,8 @@ if (import.meta.main) Bun.serve({
         try {
           resp = await callBackend(body, sessionId);
         } catch (err) {
-          if (REPLAY && !replayDisabled && /HTTP 400/.test(String(err))) {
-            console.log(`[adapter] reasoning replay rejected, disabling: ${String(err).slice(0, 300)}`);
+          if (!imageTurn && REPLAY && !replayDisabled && /HTTP 400/.test(String(err))) {
+            console.log(`[adapter] reasoning replay rejected, disabling: ${errorLogText(err, historicalImages)}`);
             replayDisabled = true;
             body.include = (body.include ?? []).filter((x: string) => x !== "reasoning.encrypted_content");
             if (!body.include.length) delete body.include;
@@ -781,6 +874,8 @@ if (import.meta.main) Bun.serve({
 
       if (url.pathname === "/v1/messages" && req.method === "POST") {
         const am = (await req.json()) as any;
+        imageTurn = isImageTurn(am);
+        historicalImages = !imageTurn && Array.isArray(am.messages) && am.messages.some((m: any) => hasImageParts(m?.content));
         const { instructions, input } = anthropicToResponsesInput(am);
         const body: any = {
           model: MODEL, instructions, input,
@@ -799,8 +894,8 @@ if (import.meta.main) Bun.serve({
         try {
           resp = await callBackend(body, sessionId);
         } catch (err) {
-          if (REPLAY && !replayDisabled && /HTTP 400/.test(String(err))) {
-            console.log(`[adapter] reasoning replay rejected, disabling: ${String(err).slice(0, 300)}`);
+          if (!imageTurn && REPLAY && !replayDisabled && /HTTP 400/.test(String(err))) {
+            console.log(`[adapter] reasoning replay rejected, disabling: ${errorLogText(err, historicalImages)}`);
             replayDisabled = true;
             body.include = (body.include ?? []).filter((x: string) => x !== "reasoning.encrypted_content");
             if (!body.include.length) delete body.include;
@@ -820,18 +915,30 @@ if (import.meta.main) Bun.serve({
 
       if (url.pathname === "/v1/messages/count_tokens" && req.method === "POST") {
         const am = (await req.json()) as any;
-        const rough = Math.ceil(JSON.stringify(am.messages ?? "").length / 4)
-          + Math.ceil(JSON.stringify(am.system ?? "").length / 4)
-          + Math.ceil(JSON.stringify(am.tools ?? "").length / 4);
+        const rough = Math.ceil(requestDiagnosticJson(am.messages ?? "").length / 4)
+          + Math.ceil(requestDiagnosticJson(am.system ?? "").length / 4)
+          + Math.ceil(requestDiagnosticJson(am.tools ?? "").length / 4);
         return Response.json({ input_tokens: rough });
       }
 
       return new Response("not found", { status: 404 });
     } catch (err: any) {
+      if (err instanceof ChatInputError || imageTurn) {
+        const local = err instanceof ChatInputError;
+        const code = local ? err.code : "image_provider_error";
+        const phase = local ? "input" : "provider";
+        const providerStatus = Number.isInteger(err?.providerStatus) ? err.providerStatus : undefined;
+        const status = local ? 400 : providerStatus && providerStatus >= 400 ? providerStatus : 502;
+        console.error(`[adapter] code=${code} phase=${phase} status=${local ? 400 : providerStatus ?? "unknown"}`);
+        const error = { code, message: IMAGE_ERRORS[code], phase, ...(local ? { status: 400 } : providerStatus !== undefined ? { status: providerStatus } : {}) };
+        return Response.json(url.pathname.startsWith("/v1/messages")
+          ? { type: "error", error: { type: status === 429 ? "rate_limit_error" : status === 401 ? "authentication_error" : status === 403 ? "permission_error" : status === 400 ? "invalid_request_error" : "api_error", ...error } }
+          : { error }, { status });
+      }
       const official = err instanceof ChatGptRouteError;
       const message = String(err?.message || err);
-      console.error(`[adapter] ${message}`);
       const status = official ? err.status : 502;
+      console.error(`[adapter] ${errorLogText(message, historicalImages)}`);
       const details = official ? { code: err.code, param: err.param, request_id: err.requestId, upstream: err.upstream } : {};
       if (url.pathname.startsWith("/v1/messages")) {
         const type = status === 429 ? "rate_limit_error" : status === 401 ? "authentication_error" : status === 403 ? "permission_error" : status === 400 ? "invalid_request_error" : "api_error";

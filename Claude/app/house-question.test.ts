@@ -36,10 +36,10 @@ function fixture() {
     renameSync: (from: string, to: string) => { writes.push({ mode: fs.statSync(from).mode & 0o777, value: JSON.parse(fs.readFileSync(from, "utf8")), to }); fs.renameSync(from, to); } };
   new Function("app", "EMBERVY_HOME_DIR", "join", "createHash", "INTERNAL_API_TOKEN", "bearerMatches", "isHumanSession", "broadcastToClients", "sendPushToAll", "S", "Date", ...Object.keys(fileFunctions), code)(
     app, dir, join, createHash, "test-internal", (value: string, token: string) => value === `Bearer ${token}`,
-    async (c: any) => ["session=test", "session=second"].includes(c.req.header("cookie")), (event: any) => events.push(event), async (...args: any[]) => { pushes.push(args); }, (key: string) => key, { now: () => now }, ...Object.values(fileFunctions),
+    async (c: any) => ["session=test", "session=second"].includes(c.req.header("cookie")), (event: any) => events.push(event), async (...args: any[]) => { pushes.push(args); }, (key: string) => key, class extends Date { static now() { return now; } }, ...Object.values(fileFunctions),
   );
   const call = (path: string, body?: any, auth = "human") => app.request(path, { method: body === undefined ? "GET" : "POST", headers: { "content-type": "application/json", ...(auth === "human" ? { cookie: "session=test" } : auth === "second" ? { cookie: "session=second" } : auth === "internal" ? { authorization: "Bearer test-internal" } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
-  return { dir, call, events, writes, pushes, advance: (ms: number) => { now += ms; }, close: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  return { dir, call, events, writes, pushes, now: () => now, advance: (ms: number) => { now += ms; }, close: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
 test("house question internal route requires its bearer and answer requires a human session", async () => {
@@ -278,7 +278,7 @@ for (const end of ["resolved", "deadline", "replacement", "reset"]) test(`unansw
     else await f.call("/api/internal/house-question", { action: end, id: q.id, instance: q.instance }, "internal");
     const data = await (await f.call("/api/house-question")).json();
     expect(data.history).toHaveLength(1);
-    expect(data.history[0]).toMatchObject({ ...q, closed: true });
+    expect(data.history[0]).toMatchObject({ ...q, closed: true, ts: new Date(f.now()).toISOString() });
     expect(data.history[0].answerLabel).toBeUndefined();
     if (end !== "replacement") expect(data.question).toBeNull();
     for (const auth of ["human", "second"]) {
@@ -304,10 +304,82 @@ test("answered permission history retains the literal choice without accepting a
     await f.call("/api/internal/house-question", { action: "resolved", id: q.id, instance: q.instance }, "internal");
     const data = await (await f.call("/api/house-question")).json();
     expect(data.question).toBeNull();
-    expect(data.history[0]).toMatchObject({ closed: true, submitted: true, answerLabel: "Yes, and don't ask again for: curl *" });
+    expect(data.history[0]).toMatchObject({ closed: true, submitted: true, answerLabel: "Yes, and don't ask again for: curl *", ts: new Date(f.now()).toISOString() });
     expect((await f.call("/api/house-question/answer", answer)).status).toBe(409);
     expect(fs.existsSync(join(f.dir, "state/house-question-answer.json"))).toBe(false);
     expect(f.pushes).toHaveLength(1);
+  } finally { f.close(); }
+});
+
+test("history keeps the newest 50 closures by server time without trimming legacy records", async () => {
+  const f = fixture();
+  try {
+    const file = join(f.dir, "state/house-question-history.json");
+    fs.mkdirSync(join(f.dir, "state"));
+    const legacy = { ...question, instance: "legacy:1", permission: true, closed: true, submitted: true, answerLabel: "Short", expiresAt: 1 };
+    fs.writeFileSync(file, JSON.stringify([legacy]));
+    for (let i = 1; i <= 55; i++) {
+      const q = { ...question, permission: true, instance: `process:${i}` };
+      await f.call("/api/internal/house-question", { action: "pending", question: q }, "internal");
+      f.advance(1000);
+      await f.call("/api/internal/house-question", { action: "resolved", id: q.id, instance: q.instance }, "internal");
+      const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+      expect(stored.filter((q: any) => q.ts).length).toBeLessThanOrEqual(50);
+      expect(stored.at(-1).ts).toBe(new Date(f.now()).toISOString());
+    }
+    const data = await (await f.call("/api/house-question")).json();
+    expect(data.history).toHaveLength(51);
+    expect(data.history[0]).toEqual(legacy);
+    expect(data.history.slice(1).map((q: any) => q.instance)).toEqual(Array.from({ length: 50 }, (_, i) => `process:${i + 6}`));
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual(data.history);
+  } finally { f.close(); }
+});
+
+test("retention uses closure time rather than file order and prunes on reads without touching the active card", async () => {
+  const f = fixture();
+  try {
+    const active = { ...question, permission: true, instance: "active:1" };
+    await f.call("/api/internal/house-question", { action: "pending", question: active }, "internal");
+    const activeFile = join(f.dir, "state/house-question.json");
+    const unchanged = fs.readFileSync(activeFile, "utf8");
+    const file = join(f.dir, "state/house-question-history.json");
+    const record = (instance: string, time: number) => ({ ...question, instance, closed: true, ts: new Date(time).toISOString() });
+    const cutoff = f.now() - 14 * 86400000;
+    const recent = Array.from({ length: 52 }, (_, i) => record(`recent:${i + 1}`, f.now() - (i + 1) * 1000));
+    const legacy = { ...question, instance: "legacy:1", closed: true };
+    fs.writeFileSync(file, JSON.stringify([legacy, ...recent, record("expired:1", cutoff - 1)]));
+    const data = await (await f.call("/api/house-question")).json();
+    expect(data.history).toEqual([legacy, ...recent.slice(0, 50)]);
+    expect(fs.readFileSync(activeFile, "utf8")).toBe(unchanged);
+    expect(data.question).toEqual(JSON.parse(unchanged));
+    expect(data.submitted).toBe(false);
+    const boundary = record("boundary:1", cutoff);
+    fs.writeFileSync(file, JSON.stringify([legacy, boundary, record("expired:2", cutoff - 1)]));
+    expect((await (await f.call("/api/house-question")).json()).history).toEqual([legacy, boundary]);
+    f.advance(1);
+    expect((await (await f.call("/api/house-question")).json()).history).toEqual([legacy]);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([legacy]);
+    expect(fs.readFileSync(activeFile, "utf8")).toBe(unchanged);
+    expect((await f.call("/api/house-question/answer", { id: active.id, instance: active.instance, number: 1 })).status).toBe(200);
+  } finally { f.close(); }
+});
+
+test("closure timestamps are server-owned and twenty-four-hour expiry is timestamped once", async () => {
+  const f = fixture();
+  try {
+    const q = { ...question, permission: true, instance: "expiry:1" };
+    for (const ts of ["2020-01-01T00:00:00Z", null, 123]) {
+      expect((await f.call("/api/internal/house-question", { action: "pending", question: { ...q, ts } }, "internal")).status).toBe(400);
+    }
+    await f.call("/api/internal/house-question", { action: "pending", question: q }, "internal");
+    const open = (await (await f.call("/api/house-question")).json()).question;
+    expect(open.ts).toBeUndefined();
+    f.advance(86400000);
+    const data = await (await f.call("/api/house-question")).json();
+    expect(data.question).toBeNull();
+    expect(data.history).toEqual([{ ...open, closed: true, ts: new Date(f.now()).toISOString() }]);
+    f.advance(1000);
+    expect((await (await f.call("/api/house-question")).json()).history).toEqual(data.history);
   } finally { f.close(); }
 });
 

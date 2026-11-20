@@ -34,7 +34,7 @@ test("mail is a labelled foreign bubble and remote reply images are links", () =
     const messageIds = new Set();
     let lastSeenTs = "", workingEl = null;
     const showTyping = () => {}, atBottom = () => true, scrollToBottom = () => {}, addKeptActions = () => {};
-    const messagesEl = { appendChild: node => nodes.push(node) };
+    const messagesEl = { appendChild: node => nodes.push(node), querySelectorAll: () => [] };
     ${pure}\n${markdown}\n${add}
     return addMessage;
   `)(document, nodes);

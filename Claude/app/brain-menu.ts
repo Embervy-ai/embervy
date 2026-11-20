@@ -63,7 +63,7 @@ export interface MenuModel {
   effortLevels: string[];
 }
 export interface MenuFamily { name: string; current: boolean; models: MenuModel[] }
-export interface MenuHead { name: string; label: string; available: boolean; reason: string | null; current: boolean; families: MenuFamily[] }
+export interface MenuHead { name: string; label: string; available: boolean; reason: string | null; setup?: "key"; setupHidden?: boolean; current: boolean; families: MenuFamily[] }
 export interface BrainMenu {
   current: {
     head: string;
@@ -161,6 +161,8 @@ export function shapeBrainHeads(raw: unknown, labels: { otherFamily?: string; no
       label: str(h?.label, 40) ?? name,
       available: h?.available === true,
       reason: h?.available === true ? null : (str(h?.reason, 200) ?? labels.notSetUp ?? NOT_SET_UP),
+      ...(h?.available !== true && h?.setup === "key" ? { setup: "key" as const } : {}),
+      ...(h?.setupHidden === true ? { setupHidden: true } : {}),
       current: isCurrentHead,
       families,
     });

@@ -285,6 +285,10 @@ function messageMenuHarness(voice: boolean) {
       }
       return null;
     }
+    querySelectorAll(selector: string): MenuElement[] {
+      if (selector === "[data-house-history]") return [];
+      throw new Error(`Unsupported menu selector: ${selector}`);
+    }
     contains(node: MenuElement | null): boolean { return node === this || this.children.some(child => child.contains(node)); }
     addEventListener(name: string, callback: (event: any) => void) { (this.listeners[name] ||= []).push(callback); }
     fire(name: string, fields: Record<string, unknown> = {}) {

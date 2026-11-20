@@ -5,7 +5,8 @@ agent running in any substrate can use it as a tool surface) and is
 deployed as a Cloudflare Worker backed by D1 (relational), Vectorize
 (embeddings), and R2 (cold archive, generated videos).
 
-Worker version: `0.3.0` (reported by `health`).
+Interface version: `0.3.0` (reported by `health`); `product_version` identifies
+the product release separately.
 
 ## Tools exposed (MCP)
 
@@ -155,6 +156,62 @@ Medium 3.5), validates the JSON, and proposes:
 The daemon proposes; the worker code executes. The LLM has no direct DB
 access. The prompt names the agent via `AGENT_NAME` (default "the
 agent").
+
+## Changing the night model
+
+Worker settings are `[vars]` in `shared/memory/wrangler.toml` for the daemon
+and `shared/memory/dream-worker/wrangler.toml` for the dream. For a new dream
+worker, copy `wrangler.toml.example` to `wrangler.toml` first, as in step 3b of
+the [install guide](https://github.com/Embervy-ai/embervy/blob/main/INSTALL.md);
+preserve an existing house's configured file. These are Worker
+variables, not the house's root `.env` and not secrets.
+
+| Setting | Default | Allowed values |
+|---|---|---|
+| `DAEMON_LLM_MODEL` | `mistralai/mistral-medium-3-5` | Model identifier (see below) |
+| `DAEMON_MAX_TOKENS` | `8000` | Integer, 256–32768 |
+| `DAEMON_TIMEOUT_MS` | `120000` | Integer milliseconds, 1000–300000 |
+| `DREAM_LLM_MODEL` | `mistralai/mistral-medium-3-5` | Model identifier (see below) |
+| `DREAM_MAX_TOKENS` | `2000` | Integer, 256–32768 |
+| `DREAM_TIMEOUT_MS` | `60000` | Integer milliseconds, 1000–300000 |
+
+Use quoted decimal strings in TOML. Whitespace is trimmed. Empty, malformed,
+or out-of-range settings fall back to the defaults. Model identifiers must
+match `[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}` after trimming. A model that thinks
+before answering needs more output budget and more waiting time. Timeouts
+apply per provider request; existing retry statuses and pauses are unchanged.
+The highest timeout combined with repeated retries can exceed the scheduled
+invocation's lifetime; choose conservative values rather than all maxima.
+
+After editing, redeploy the affected worker with `wrangler deploy` from its
+project directory, with the human's explicit approval. Deploy both the memory
+and dream workers to receive all changes in this update. Restarting the local
+agent alone does not update Worker code or variables.
+
+The authenticated memory `health` tool reports `daemon_llm_model`,
+`daemon_max_tokens`, `daemon_timeout_ms`, and `product_version` (the root
+`VERSION`, distinct from interface version `0.3.0`). The dream worker's
+existing `/health` reports `dream_llm_model`, `dream_max_tokens`, and
+`dream_timeout_ms`. No new endpoint is needed.
+
+Failed daemon runs store only a fixed class and optional HTTP status in the
+existing `error_message` column. HTTP error bodies (`provider_http`) are never
+read or retained. For `provider_response`, model content from a successful HTTP
+response remains in the house's own database in `raw_response`: up to 8000
+characters for invalid JSON, or 5000 for an invalid proposal. Health and the
+doctor never expose this content. Inspect it privately for truncated JSON;
+`DAEMON_MAX_TOKENS` may be too small for a model that thinks before answering.
+Internal `unexpected` and `write_failed` errors additionally log the original
+name and message (at most 500 characters) in the house's Cloudflare Worker log,
+not in the database error field or health; provider errors log only their fixed
+class and optional status.
+Old free-text errors are withheld by health and the doctor; no migration is
+needed, and historical database rows are not rewritten. A failed dream attempt
+adds a health warning; no attempt means no dream warning. The memory worker
+cannot read the house's `.env`: if a previously active dream is disabled,
+mirror `EMBERVY_DREAM = "off"` in the memory worker's `[vars]` to suppress its
+historical failure warning. This variable only affects reporting; it does not
+change the dream schedule. The doctor already reads the local house choice.
 
 ## HTTP endpoints
 

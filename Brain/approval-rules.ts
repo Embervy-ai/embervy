@@ -1,8 +1,8 @@
 // Cards ask before listed actions, including changes to approval settings; they are not a sandbox.
 // A determined or injected agent with root can bypass these heuristics. Interpreter code such as
 // python3 -c, variable expansion and arbitrary shell syntax are not parsed.
-import { readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, posix, resolve } from "node:path";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { appMcpServer } from "./app-channel";
 
@@ -68,6 +68,90 @@ export function approvalPath(path: string, cwd = process.cwd(), canonical = true
     if (parent === current) return join(current, ...tail);
     tail.unshift(basename(current));
     current = parent;
+  }
+}
+
+type OwnSkillsEnv = Record<string, string | undefined>;
+
+export const OWN_SKILLS_DENIAL = "Permission prompts are disabled in this house. Only file writes under the house's own .claude/skills/ are allowed (when BRAIN_OWN_SKILLS_WRITE is enabled).";
+
+export function ownSkillsWriteEnabled(env: OwnSkillsEnv, controlEndpoint: boolean): boolean {
+  return controlEndpoint && !env.BRAIN_APPROVAL_SETTINGS
+    && (env.BRAIN_OWN_SKILLS_WRITE ?? "on").toLowerCase() === "on"
+    && Boolean(env.BRAIN_CLAUDE_CWD && isAbsolute(env.BRAIN_CLAUDE_CWD));
+}
+
+function insideOwnPath(root: string, path: string): boolean {
+  return path.startsWith(root + "/");
+}
+
+// Separate from the allowed-subdirectory list so expanding it cannot authorize
+// startup settings or hooks. Check both the requested and resolved names.
+function ownClaudeStartupPath(path: string): boolean {
+  return ["settings.json", "settings.local.json"].includes(basename(path))
+    || path.split("/").includes("hooks");
+}
+
+/** Resolve every component, including symlink chains, without allowing an exit
+ * from .claude followed by a re-entry. Missing ordinary parents are valid for
+ * Write; dangling/looping links and filesystem errors fail closed. This is a
+ * permission-time check, not an atomic filesystem sandbox. */
+export function ownSkillsWriteAllowed(tool: string, input: unknown, env: OwnSkillsEnv, controlEndpoint: boolean): boolean {
+  if (!ownSkillsWriteEnabled(env, controlEndpoint) || !["Write", "Edit", "MultiEdit"].includes(tool)) return false;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const path = (input as Record<string, unknown>).file_path;
+  if (typeof path !== "string" || !path || path.includes("\0")) return false;
+  // Do not erase traversal before checking symlinks. Claude file tools normally
+  // supply absolute paths; ambiguous traversal requests are denied outright.
+  if (path.split("/").includes("..")) return false;
+  try {
+    const cwd = resolve(env.BRAIN_CLAUDE_CWD!);
+    const root = join(realpathSync(cwd), ".claude");
+    const requested = resolve(cwd, path);
+    // A CLI may report its canonical cwd even when configured through an alias.
+    const requestedRoot = [join(cwd, ".claude"), root]
+      .find((candidate) => insideOwnPath(join(candidate, "skills"), requested));
+    if (!requestedRoot) return false;
+    const suffix = relative(requestedRoot, requested);
+    if (ownClaudeStartupPath(suffix)) return false;
+    // A relocated .claude is not this house's own configuration directory.
+    try {
+      if (!lstatSync(root).isDirectory()) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+    let current = root;
+    const pending = suffix.split("/");
+    let links = 0;
+    while (pending.length) {
+      const part = pending.shift()!;
+      if (!part || part === ".") continue;
+      const next = resolve(current, part);
+      if (next !== root && !insideOwnPath(root, next)) return false;
+      let info;
+      try { info = lstatSync(next); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+      }
+      if (info?.isSymbolicLink()) {
+        if (++links > 40) return false;
+        realpathSync(next); // A dangling link is not a missing ordinary parent.
+        const target = readlinkSync(next);
+        if (isAbsolute(target)) {
+          if (!insideOwnPath(root, target)) return false;
+          current = root;
+          pending.unshift(...target.slice(root.length + 1).split("/"));
+        } else {
+          pending.unshift(...target.split("/"));
+        }
+        continue;
+      }
+      if (info && (pending.length ? !info.isDirectory() : !info.isFile())) return false;
+      current = next;
+    }
+    return insideOwnPath(join(root, "skills"), current)
+      && !ownClaudeStartupPath(relative(root, current));
+  } catch {
+    return false;
   }
 }
 

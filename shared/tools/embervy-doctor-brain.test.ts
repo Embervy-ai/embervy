@@ -259,7 +259,7 @@ for (const harness of ["brain", "claude-code"]) {
       health = { daemon_last_run: recent, daemon_last_ok: false, dream_last_run: recent, warnings: ["last daemon run failed: model unavailable"] };
       line = find(await doctorAsync(home, env), "memory.nightly");
       expect(line?.status).toBe("WARN");
-      expect(line?.detail).toContain("model unavailable");
+      expect(line?.detail).toContain("last daemon run failed: details withheld (recorded before 1.0.3)");
       health.daemon_last_ok = true;
       health.warnings = [];
       expect(find(await doctorAsync(home, env), "memory.nightly")?.status).toBe("OK");
@@ -282,7 +282,7 @@ for (const harness of ["brain", "claude-code"]) {
       health.warnings = ["last daemon run failed: scheduler error"];
       line = find(await doctorAsync(home, env), "memory.nightly");
       expect(line?.status).toBe("WARN");
-      expect(line?.detail).toContain("scheduler error");
+      expect(line?.detail).toContain("last daemon run failed: details withheld (recorded before 1.0.3)");
       rmSync(join(home, "state.json"));
       health.warnings = [];
       const archiveEnv = { ...env, RAG_URL: `http://127.0.0.1:${worker.port}`, RAG_AUTH_TOKEN: "house-rag-key" };

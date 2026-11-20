@@ -131,11 +131,16 @@ const asJson = startup || process.argv.includes("--json");
 const verbose = process.argv.includes("--verbose") || process.argv.includes("-v");
 
 
-async function httpJson(url: string, init: RequestInit = {}, timeoutMs = 10_000) {
+async function httpJson(url: string, init: RequestInit = {}, timeoutMs = 10_000, readErrorBody = true) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...init, signal: ctrl.signal });
+    if (!readErrorBody && res.status !== 200) {
+      // Nightly health needs only the status, never a remote error body's text.
+      void res.body?.cancel().catch(() => {});
+      return { status: res.status, body: null };
+    }
     const text = await res.text();
     let body: unknown = text;
     try { body = JSON.parse(text); } catch { /* keep as text */ }
@@ -422,6 +427,24 @@ async function checkRagToken() {
 }
 
 // Treat optional remote trace fields as data, never as ready-to-print error text.
+function nightModelHint(kind: "daemon" | "dream", status: unknown): string {
+  return status === 400 || status === 404
+    ? ` The model may no longer exist at the provider; check ${kind === "daemon" ? "DAEMON_LLM_MODEL" : "DREAM_LLM_MODEL"} in shared/memory/README.md, section "Changing the night model".` : "";
+}
+
+// Accept only the bounded new grammar; old workers may still return provider bodies.
+function daemonFailureExplanation(warnings: string[]): string {
+  const value = warnings.find(w => w.startsWith("last daemon run failed: "))?.slice("last daemon run failed: ".length) ?? "";
+  const fixed = value === value.trim() && /^(provider_http(?: [1-5][0-9]{2})?|provider_unreachable|provider_timeout|provider_response(?: [1-5][0-9]{2})?|write_failed|unexpected)$/.test(value);
+  const legacyStatus = /^OpenRouter ([1-5][0-9]{2})(?=[: ]|$)/.exec(value)?.[1]
+    ?? /^details withheld \(recorded before 1\.0\.3\) \(HTTP ([1-5][0-9]{2})\)$/.exec(value)?.[1];
+  const detail = fixed ? value : `details withheld (recorded before 1.0.3)${legacyStatus ? ` (HTTP ${legacyStatus})` : ""}`;
+  const status = /^provider_http ([1-5][0-9]{2})$/.exec(value)?.[1] ?? legacyStatus;
+  return `last daemon run failed: ${detail}` + nightModelHint("daemon", Number(status))
+    + (value === "provider_timeout" ? ' Check DAEMON_TIMEOUT_MS and DAEMON_MAX_TOKENS in shared/memory/README.md, section "Changing the night model".' : "")
+    + (fixed && /^provider_response(?: |$)/.test(value) ? ' The response was empty or not valid JSON; for a model that thinks before answering, DAEMON_MAX_TOKENS may be too small (see shared/memory/README.md, section "Changing the night model").' : "");
+}
+
 function dreamAttemptExplanation(health: any): string {
   if (typeof health.dream_last_attempt !== "string") return "";
   const attempted = Date.parse(health.dream_last_attempt);
@@ -434,7 +457,7 @@ function dreamAttemptExplanation(health: any): string {
   const status = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599
     ? ` (HTTP ${error.status})` : "";
   switch (error?.class) {
-    case "provider_http": return ` The last dream attempt failed because the provider returned an error${status} after the configured attempts.`;
+    case "provider_http": return ` The last dream attempt failed because the provider returned an error${status} after the configured attempts.` + nightModelHint("dream", error.status);
     case "provider_unreachable": return " The last dream attempt failed because the provider could not be reached.";
     case "provider_response": return " The last dream attempt failed because the provider response was empty or unusable.";
     case "write_failed": return " The last dream attempt failed because the dream note could not be saved.";
@@ -450,19 +473,27 @@ async function checkMemoryNightly() {
   if (offline || !EMBERVY_URL || !EMBERVY_API_KEY) {
     return report("SKIP", `not checked — ${offline ? "offline mode" : "memory worker URL or key missing"}`);
   }
+  let receivedResponse = false;
   try {
     const response = await httpJson(`${EMBERVY_URL.replace(/\/$/, "")}/mcp`, {
       method: "POST", headers: { Authorization: `Bearer ${EMBERVY_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "health", arguments: {} } }),
-    });
+    }, 10_000, false);
+    receivedResponse = true;
     const rpc = response.body as any;
-    if (response.status !== 200 || rpc?.error || rpc?.result?.isError) {
-      return report("WARN", `not checked — memory health failed (HTTP ${response.status})`);
+    if (response.status !== 200) {
+      return report("WARN", `not checked — cannot read memory health: HTTP ${response.status}`);
+    }
+    if (!record(rpc) || rpc.error || rpc.result?.isError || !record(rpc.result)) {
+      return report("WARN", "not checked — cannot read memory health: invalid response");
     }
     const text = (rpc?.result?.content || []).filter((item: any) => item.type === "text").map((item: any) => item.text).join("\n");
     const fenced = text.match(/```json\s*([\s\S]*?)```/);
     const health = rpc?.result?.structuredContent || (fenced ? JSON.parse(fenced[1]) : null);
-    if (!health || !["daemon_last_run", "daemon_last_ok", "dream_last_run"].every(key => key in health)) {
+    if (!record(health)) {
+      return report("WARN", "not checked — cannot read memory health: invalid response");
+    }
+    if (!["daemon_last_run", "daemon_last_ok", "dream_last_run"].every(key => key in health)) {
       return report("WARN", "not checked — memory health has no nightly run fields");
     }
     let installed: number | null = null;
@@ -482,9 +513,14 @@ async function checkMemoryNightly() {
         || warnings.some((message: string) => /daemon.*failed/i.test(message)));
       if (failed || String(run).toLowerCase().includes("failed")) {
         warn = true;
-        return `${kind}: failed — ${warnings.join("; ") || String(run)}`;
+        return kind === "daemon" ? `daemon: failed — ${daemonFailureExplanation(warnings)}` : "dream: failed";
       }
       if (run === null || run === "never") {
+        const explanation = kind === "dream" ? dreamAttemptExplanation(health) : "";
+        if (health.dream_last_result === "failed" && explanation) {
+          warn = true;
+          return `dream: the nightly run has not happened yet${explanation}`;
+        }
         if (born === null) { unchecked = true; return `${kind}: not checked — never; house age unknown`; }
         if (Date.now() - born < windowMs) return `${kind}: never — not due yet`;
         warn = true;
@@ -494,14 +530,23 @@ async function checkMemoryNightly() {
       if (!Number.isFinite(time) || time > Date.now()) {
         unchecked = true; return `${kind}: not checked — invalid last run timestamp`;
       }
-      if (Date.now() - time <= windowMs) return `${kind}: successful run within 26 hours`;
+      if (Date.now() - time <= windowMs) {
+        const explanation = kind === "dream" ? dreamAttemptExplanation(health) : "";
+        if (health.dream_last_result === "failed" && explanation) {
+          warn = true;
+          return `dream: last attempt failed.${explanation}`;
+        }
+        return `${kind}: successful run within 26 hours`;
+      }
       warn = true;
       return `${kind}: last successful run is older than 26 hours (${run})${kind === "dream" ? dreamAttemptExplanation(health) : ""}`;
     });
     if (dreamOff) details.push("dream: off by the house's choice (EMBERVY_DREAM=off)");
     report(warn ? "WARN" : unchecked ? "SKIP" : "OK", details.join("; "));
   } catch (error: any) {
-    report("WARN", `not checked — cannot read memory health: ${error.message}`);
+    const cause = ["AbortError", "TimeoutError"].includes(error?.name) ? "timeout"
+      : receivedResponse ? "invalid response" : "unreachable";
+    report("WARN", `not checked — cannot read memory health: ${cause}`);
   }
 }
 

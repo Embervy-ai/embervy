@@ -214,9 +214,9 @@ describe("loading from disk", () => {
 describe("browser side (public/i18n.js)", () => {
   const at1405 = new Date(2026, 8, 30, 14, 5).toISOString();
 
-  test("time and numbers follow the language setting; English by default", () => {
+  test("time uses the house clock while numbers follow the language setting", () => {
     const create = (language: string) => runInBrowser(clientScript(mergeStrings(EN, { language })), []).window.embervyI18n;
-    expect(create("en").formatTime(at1405)).toMatch(/^02:05\sPM$/u);
+    expect(create("en").formatTime(at1405)).toBe("14:05");
     expect(create("de").formatTime(at1405)).toBe("14:05");
     expect(create("en-GB").formatTime(at1405)).toBe("14:05");
     expect(create("fr").formatTime(at1405)).toBe("14:05");

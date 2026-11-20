@@ -9,7 +9,7 @@ const homes: string[] = [];
 afterAll(() => homes.forEach(home => rmSync(home, { recursive: true, force: true })));
 const oldRun = "2025-01-01T04:00:00.000Z";
 const marker = "PRIVATE-provider-text-key-https://secret.invalid/?token=secret";
-function doctor(trace: Record<string, unknown> = {}, options: { text?: boolean; off?: boolean; never?: boolean; recent?: boolean } = {}) {
+export function doctor(trace: Record<string, unknown> = {}, options: { text?: boolean; off?: boolean; never?: boolean; recent?: boolean; healthFailure?: "http" | "network" | "timeout" | "json" | "fenced" | "shape" | "text" } = {}) {
   const home = mkdtempSync(join(tmpdir(), "doctor-dream-trace-"));
   homes.push(home);
   mkdirSync(join(home, "Claude/app"), { recursive: true });
@@ -34,6 +34,16 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.pathname === "/health") return Response.json({ status: "ok" });
   const body = JSON.parse(init.body || "{}");
   if (body.method === "tools/list") return Response.json({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
+  if (body.params?.name === "health") {
+    const failure = ${JSON.stringify(options.healthFailure ?? "")};
+    if (failure === "http") return new Response(${JSON.stringify(marker)}, { status: 401 });
+    if (failure === "network") throw new TypeError(${JSON.stringify(marker)});
+    if (failure === "timeout") throw new DOMException(${JSON.stringify(marker)}, "AbortError");
+    if (failure === "json") return new Response(${JSON.stringify(marker)});
+    if (failure === "fenced") return Response.json({ result: { content: [{ type: "text", text: "\x60\x60\x60json\\n" + ${JSON.stringify(marker)} + "\\n\x60\x60\x60" }] } });
+    if (failure === "shape") return Response.json({ result: { content: ${JSON.stringify(marker)} } });
+    if (failure === "text") return Response.json({ result: { content: [{ type: "text", text: ${JSON.stringify(marker)} }] } });
+  }
   if (body.params?.name === "health") return Response.json({ jsonrpc: "2.0", id: body.id,
     result: { content: [{ type: "text", text: "Health\\n\\n\x60\x60\x60json\\n" + JSON.stringify(${JSON.stringify(health)}) + "\\n\x60\x60\x60" }] } });
   return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "No results" }] } });

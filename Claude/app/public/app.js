@@ -6,10 +6,19 @@
   // Device preferences take precedence over installer defaults.
   const HOUSE_FEATURES = window.embervyHouseFeatures || {};
 
+  function fallbackClock(ts, withDate = false) {
+    let timeZone = window.embervyHouseTimeZone || undefined;
+    try { new Intl.DateTimeFormat("en-GB", { timeZone }); } catch { timeZone = undefined; }
+    const date = new Date(ts);
+    if (Number.isNaN(date.getTime())) return "";
+    const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone });
+    return withDate ? date.toLocaleDateString("en", { dateStyle: "medium", timeZone }) + ", " + time : time;
+  }
   const I18N = window.embervyI18n || {
     language: "en",
     t: (key) => key,
-    formatTime: (ts) => new Date(ts).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" }),
+    formatTime: (ts) => fallbackClock(ts),
+    formatDateTime: (ts) => fallbackClock(ts, true),
     formatNumber: (n) => Number(n).toLocaleString("en"),
   };
   const t = I18N.t;
@@ -243,13 +252,16 @@
   }
 
   const SHIPPED_THEME_COLOR = document.querySelector?.('meta[name="theme-color"]')?.getAttribute("content") || "";
-  function applyAppearance() {
+  const shippedTitle = document.querySelector("#header h1");
+  const shippedHeading = shippedTitle ? { text: shippedTitle.textContent, font: shippedTitle.style.fontFamily || "", color: shippedTitle.style.color || "" } : null;
+  function applyAppearance(sharedAppearance) {
     let a, raw;
     try { raw = localStorage.getItem("embervy-appearance"); a = healAppearance(JSON.parse(raw || "{}")); }
     catch { a = {}; }
     if (raw && JSON.stringify(a) !== raw) {
       try { localStorage.setItem("embervy-appearance", JSON.stringify(a)); } catch {}
     }
+    if (sharedAppearance) a = sharedAppearance;
     const root = document.documentElement.style;
     const valid = (v) => /^#[0-9a-f]{6}$/i.test(v || "");
     const rgba = (hex, pct) => {
@@ -319,12 +331,35 @@
     }
     const h1 = document.querySelector("#header h1");
     if (h1) {
-      if (a.titleText) h1.textContent = a.titleText;
-      if (a.titleFont) h1.style.fontFamily = a.titleFont;
-      if (a.titleColor) h1.style.color = a.titleColor;
+      h1.textContent = a.titleText || shippedHeading?.text || "";
+      h1.style.fontFamily = a.titleFont || shippedHeading?.font || "";
+      h1.style.color = a.titleColor || shippedHeading?.color || "";
     }
   }
   applyAppearance();
+  // Paint the last known look first. A failed refresh is silent and changes nothing.
+  async function refreshHouseAppearance() {
+    try {
+      let raw = null, local = {};
+      try { raw = localStorage.getItem("embervy-appearance"); } catch {}
+      try { local = healAppearance(JSON.parse(raw || "{}")); } catch {}
+      const next = await window.embervyHouseLook.sync(local, true);
+      // A settings save or a newer refresh may have completed while this request waited.
+      let latest = raw;
+      try { latest = localStorage.getItem("embervy-appearance"); } catch {}
+      if (latest !== raw || JSON.stringify(next) === JSON.stringify(local)) return;
+      try { localStorage.setItem("embervy-appearance", JSON.stringify(next)); } catch {}
+      applyAppearance(next);
+    } catch { /* Offline: keep the last known house appearance. */ }
+  }
+  void refreshHouseAppearance();
+  // Appearance refresh is independent of socket liveness and also runs on PWA restoration.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refreshHouseAppearance();
+  });
+  window.addEventListener("pageshow", (event) => { if (event.persisted) void refreshHouseAppearance(); });
+  document.addEventListener("resume", () => { void refreshHouseAppearance(); });
+  window.addEventListener("online", () => { void refreshHouseAppearance(); });
 
   function featureEnabled(key) {
     try {
@@ -1200,17 +1235,18 @@
     for (const question of history) {
       if (!question.closed || Array.from(messagesEl.querySelectorAll("[data-house-history]")).some(card =>
         card.dataset.houseQuestion === question.id && (card.dataset.houseInstance || "") === (question.instance || ""))) continue;
-      // History currently need not contain a timestamp. Never derive one from its expiry.
-      const ts = question.ts && Number.isFinite(new Date(question.ts).getTime()) ? question.ts : null;
-      const bubble = createMessageBubble("assistant", renderHouseQuestionCard(question, true), ts);
+      // Legacy records have no known closure time. Never infer it from expiry or reload time.
+      if (!question.ts || !Number.isFinite(new Date(question.ts).getTime())) continue;
+      const bubble = createMessageBubble("assistant", renderHouseQuestionCard(question, true), question.ts);
       const active = messagesEl.querySelector("[data-house-question]:not([data-house-history])");
-      const current = active?.closest(".message");
-      if (active && active.dataset.houseQuestion === question.id && (active.dataset.houseInstance || "") === (question.instance || "")) current.replaceWith(bubble);
-      else if (current) current.before(bubble);
-      else messagesEl.appendChild(bubble);
+      if (active && active.dataset.houseQuestion === question.id && (active.dataset.houseInstance || "") === (question.instance || "")) active.closest(".message").remove();
+      messagesEl.appendChild(bubble);
       changed = true;
     }
-    if (changed) scrollToBottom(wasAtBottom);
+    if (changed) {
+      positionClosedHouseQuestions();
+      scrollToBottom(wasAtBottom);
+    }
   }
   setInterval(() => {
     messagesEl.querySelectorAll("[data-house-deadline]").forEach(item => {
@@ -1226,7 +1262,7 @@
       if (!res.ok) return;
       const data = await res.json();
       if (version === houseQuestionVersion) {
-        // Close in place before removing or replacing the open question.
+        // Place closed cards by server time before refreshing the open question.
         updateHouseQuestionHistory(data.history || []);
         updateHouseQuestion(data.question, data.submitted);
       }
@@ -1390,9 +1426,27 @@
   function createMessageBubble(role, content, ts) {
     const div = document.createElement("div");
     div.className = `message ${role}`;
+    if (ts && Number.isFinite(new Date(ts).getTime())) div.dataset.messageTs = String(new Date(ts).getTime());
     const time = ts ? formatTime(ts) : "";
     div.innerHTML = `${content}${time ? `<span class="time">${escapeHtml(time)}</span>` : ""}`;
     return div;
+  }
+
+  function positionClosedHouseQuestions() {
+    const closed = Array.from(messagesEl.querySelectorAll("[data-house-history]"))
+      .map(card => card.closest(".message"))
+      .sort((a, b) => Number(a.dataset.messageTs) - Number(b.dataset.messageTs));
+    // Reposition only closed cards, including when messages arrive after the history request.
+    for (const bubble of closed) bubble.remove();
+    for (const bubble of closed) {
+      const timeline = Array.from(messagesEl.querySelectorAll(".message[data-message-ts]"));
+      const next = timeline.find(node => !("houseFirstSeen" in node.dataset) && Number(node.dataset.messageTs) > Number(bubble.dataset.messageTs));
+      const last = timeline[timeline.length - 1];
+      if (next) next.before(bubble);
+      // Keep a trailing open question at the end, without using its browser clock for history ordering.
+      else if (last && "houseFirstSeen" in last.dataset) last.before(bubble);
+      else messagesEl.appendChild(bubble);
+    }
   }
 
   function addMessage(role, text, ts, id, imageUrl, audioUrl, duration, replyMeta, approvalMeta) {
@@ -1442,6 +1496,7 @@
     // the view out of the slack and stop the reply from being followed.
     const wasAtBottom = atBottom();
     messagesEl.appendChild(div);
+    positionClosedHouseQuestions();
     scrollToBottom(role === "user" || wasAtBottom);
     if (approvalId) {
       updateApproval(approvalId, approvalStates.get(approvalId) || "pending");
@@ -1453,6 +1508,7 @@
   function addVoiceMessage(role, text, ts, id, audioUrl, duration, replyMeta) {
     const div = document.createElement("div");
     div.className = `message ${role} voice-message`;
+    if (ts && Number.isFinite(new Date(ts).getTime())) div.dataset.messageTs = String(new Date(ts).getTime());
     div.style.maxWidth = "160px";
     div.style.padding = "4px 8px";
     div.style.whiteSpace = "normal";
@@ -1511,6 +1567,7 @@
     // the view out of the slack and stop the reply from being followed.
     const wasAtBottom = atBottom();
     messagesEl.appendChild(div);
+    positionClosedHouseQuestions();
     scrollToBottom(role === "user" || wasAtBottom);
   }
 
@@ -1677,7 +1734,7 @@
     messagesEl.querySelectorAll(".message[data-msg-id]").forEach(paintKeptMarker);
   }
   function keptMeta(entry) {
-    const date = new Date(entry.said_at).toLocaleString(I18N.language, { dateStyle: "medium", timeStyle: "short" });
+    const date = I18N.formatDateTime(entry.said_at);
     return `${date} · ${entry.speaker === "agent" ? t("kept.agent") : t("kept.person")}`;
   }
   function clearKeptBody() {
@@ -3585,6 +3642,8 @@
   let brainMenuMsg = null;
   let bmSel = { head: null, family: null, model: null, effort: "" };
   let bmReloadTimer = null;
+  let bmKeyForm = null;
+  let bmKeyBusy = false;
   const bmSignIns = { claude: { url: "", code: "", busy: false }, gpt: { url: "", code: "", busy: false } };
 
   function showBrainMenuButton(brain) {
@@ -3725,7 +3784,8 @@
           select.setAttribute("aria-label", t("brainMenu.head"));
           for (const h of d.heads) {
             // Why a head is missing (a key name, a login) is for the agent and the logs; the person sees "not set up".
-            const text = h.available ? bmMark(h.current, h.label) : t("brainMenu.unavailable", { name: h.label });
+            const text = h.available ? bmMark(h.current, h.label) : !h.setupHidden && h.setup === "key" && Object.hasOwn(BM_KEY_SETUP, h.name)
+              ? `${h.label} — ${t("brainMenu.key.setup")}` : t("brainMenu.unavailable", { name: h.label });
             select.append(bmOption(h.name, text, { selected: h.name === bmSel.head, disabled: !h.available && !h.current }));
           }
           select.addEventListener("change", () => { brainMenuMsg = null; bmSelectHead(select.value); renderBrainMenu(); });
@@ -3781,6 +3841,9 @@
         }
         brainMenuBody.append(heads);
       }
+      if (!d.restartOnly) for (const head of d.heads) {
+        if (!head.available && !head.setupHidden && head.setup === "key" && Object.hasOwn(BM_KEY_SETUP, head.name)) brainMenuBody.append(bmKeySetup(head));
+      }
       for (const kind of ["claude", "gpt"]) {
         if (d.heads.some((h) => h.name === kind && !h.available && !h.current)) brainMenuBody.append(bmSignIn(kind));
       }
@@ -3822,6 +3885,62 @@
     actions.append(bmButton(t("brainMenu.restart"), bmRestart));
     session.append(actions);
     brainMenuBody.append(session);
+  }
+
+  // Provider-specific help is kept separate from the common key form. GLM is not enabled.
+  const BM_KEY_SETUP = { kimi: { source: () => t("brainMenu.key.kimiSource") } };
+  async function bmKeyRequest(head, input) {
+    if (bmKeyBusy) return;
+    const body = JSON.stringify({ key: input.value });
+    input.value = "";
+    bmKeyBusy = true;
+    bmKeyForm = null;
+    brainMenuMsg = null;
+    renderBrainMenu();
+    try {
+      const res = await fetch(`/api/brain/key-setup/${head.name}/save`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body,
+      });
+      const data = await res.json().catch(() => ({}));
+      brainMenuMsg = res.ok && data.ok
+        ? { text: data.effective }
+        : { text: data.error || t("brainMenu.key.error.request"), error: true };
+    } catch {
+      // A fetch exception is not safe to display for a credential-bearing request.
+      brainMenuMsg = { text: t("brainMenu.key.error.request"), error: true };
+    } finally { bmKeyBusy = false; }
+    await loadBrainMenu({ keepSelection: true }); // Only Brain decides availability.
+  }
+  function bmKeySetup(head) {
+    const section = bmSection(head.label);
+    if (head.setup === "key" && bmKeyForm !== head.name) {
+      const start = bmButton(bmKeyBusy ? t("brainMenu.key.working") : t("brainMenu.key.setup"), () => {
+        bmKeyForm = head.name;
+        brainMenuMsg = null;
+        renderBrainMenu();
+      }, "bm-apply");
+      start.disabled = bmKeyBusy;
+      const row = bmEl("div", "bm-apply-row");
+      row.append(start);
+      section.append(row);
+    }
+    if (head.setup === "key" && bmKeyForm === head.name) {
+      section.append(bmEl("p", "brain-menu-note", BM_KEY_SETUP[head.name].source()),
+        bmEl("p", "brain-menu-note", t("brainMenu.key.privacy")));
+      const input = bmEl("input", "bm-input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.minLength = 8;
+      input.maxLength = 512;
+      input.setAttribute("aria-label", t("brainMenu.key.label"));
+      section.append(bmField(t("brainMenu.key.label"), input));
+      const row = bmEl("div", "bm-apply-row approval-actions");
+      row.append(bmButton(t("brainMenu.key.save"), () => bmKeyRequest(head, input), "bm-apply approval-allow"),
+        bmButton(t("brainMenu.key.cancel"), () => { input.value = ""; bmKeyForm = null; renderBrainMenu(); }));
+      section.append(row);
+    }
+    return section;
   }
 
   // Keep the selection after an effort change so the next tap cannot land on Restart.
@@ -4053,6 +4172,8 @@
   function closeBrainMenu(focus = true) {
     if (!brainMenuOverlay || brainMenuOverlay.hidden) return;
     clearTimeout(bmReloadTimer);
+    bmKeyForm = null;
+    renderBrainMenu(); // Drop any password input instead of leaving it in the hidden overlay.
     brainMenuOverlay.hidden = true;
     if (brainMenuBtn) {
       brainMenuBtn.setAttribute("aria-expanded", "false");

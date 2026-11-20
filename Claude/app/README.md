@@ -10,6 +10,18 @@ The PWA in `public/` is generic — login + chat + WebSocket + push + image /
 voice upload + reactions + settings. Nothing in `public/` is specific to one
 user.
 
+## Appearance and the house clock
+
+Settings share the **name, title font, background mode and background photo** with every device in this house. Colors and opacity remain device choices, along with features, speech language and send behavior. **Use the house look** removes only device color/opacity overrides; it does not clear the shared name, font or photo. Presets also change only device colors.
+
+The app paints the local last-known look immediately, then quietly refreshes shared fields from the house. With no network it keeps that last-known look, including the photo. A device-only photo hash, retained after refreshes and successful saves, prevents repeat image downloads unless the version changes or the local image is missing. The first device with legacy shared choices can adopt them only if the house has no saved version yet; an existing house version always wins. A settings save is the explicit way to change it afterwards. Failed house writes retain the previous appearance and device choices and show an error.
+
+The server stores `house-look.json` and a separate `house-look-photo-<sha256>` image in `EMBERVY_APP_DATA_DIR` (default: `Claude/app/data`). Metadata and photo writes use temporary files and rename; JSON is committed after the image. Back up the metadata and its referenced image together. The private routes require a human session and are not cached. `public/style.css` and `public/index.html` remain the base: missing shared fields leave the file-based look in effect, and existing appearance healing still removes old default snapshots. Installer feature defaults are unchanged. Houses may add custom title fonts: empty values or CSS font lists up to 200 characters with Unicode letters, digits, spaces, commas, hyphens, underscores and paired straight quotes are accepted, but controls and CSS escape syntax are rejected, and the value is applied only via `style.fontFamily`.
+
+Chat bubbles, terminal logs, Kept and doctor hints use the same two-digit **24-hour clock** in the house time zone. `/feature-defaults.js` supplies `houseTimeZone()` to the browser (the existing `EMBERVY_TIMEZONE`, `TZ`, then Brain environment setting). A missing or invalid zone falls back to the device zone in the browser. Kept date parts still follow the interface language.
+
+See [appearance storage and settings](../../docs/app-appearance.md) for route contracts, limits and device checks.
+
 ## Kept messages
 
 Use the bookmark in a message's long-press or right-click menu (or its actions button, a keyboard path that appears on keyboard focus) to keep a copy for later; the app briefly confirms when it is kept. Use the **bookmark button in the header** to open Kept and read or remove copies, even after the original leaves the chat window. The private list lives on your own server in `data/kept.json`, not in the agent's context. It holds up to 200 messages of 20,000 characters each; local voice recordings remain playable while their files exist. The agent's `add_to_kept` tool can only add a passage you ask it to keep, never read or remove entries.
@@ -34,8 +46,8 @@ changed plus `"language"`:
 ```
 
 - `"language"` is a language tag (`"fr"`, `"de"`, `"en-GB"`, `"pt-BR"`). It sets
-  `<html lang>`, speech input and the time/number format (`"en"` shows
-  `02:05 PM`, `"en-GB"` and `"de"` show `14:05`).
+  `<html lang>`, speech input, date parts and number formatting. Clock times
+  always use `14:05`-style 24-hour notation in the house time zone, in every language.
 - Keys it does not name stay English. Unknown keys, non-text values and broken
   JSON are skipped and logged — the app keeps running in English.
 - The change shows the next time the app is opened or comes back to the

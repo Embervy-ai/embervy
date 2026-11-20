@@ -18,6 +18,8 @@ interface Env {
   DREAM_HOUR?: string; // local hour to dream, default "4"
   DREAM_TIMEZONE?: string; // IANA zone, the installer sets the house zone (default "UTC")
   DREAM_LLM_MODEL?: string; // optional: another OpenRouter model for the dream (default below)
+  DREAM_MAX_TOKENS?: string;
+  DREAM_TIMEOUT_MS?: string;
 }
 
 const DISCLAIMER = `\n\n*[dreamt associatively — check what resonates]*`;
@@ -25,6 +27,20 @@ const DISCLAIMER = `\n\n*[dreamt associatively — check what resonates]*`;
 // The output budget below is written for a model that answers directly. A model that
 // reasons first can spend the whole budget on reasoning and return no text.
 const DEFAULT_MODEL = "mistralai/mistral-medium-3-5";
+// Decimal integers only: output 256–32768 tokens, request timeout 1000–300000 ms.
+function integerSetting(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return fallback;
+  const n = Number(value.trim());
+  return Number.isSafeInteger(n) && n >= min && n <= max ? n : fallback;
+}
+export function dreamSettings(env: Pick<Env, "DREAM_LLM_MODEL" | "DREAM_MAX_TOKENS" | "DREAM_TIMEOUT_MS">) {
+  const model = typeof env.DREAM_LLM_MODEL === "string" ? env.DREAM_LLM_MODEL.trim() : "";
+  return {
+    dream_llm_model: /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model) ? model : DEFAULT_MODEL,
+    dream_max_tokens: integerSetting(env.DREAM_MAX_TOKENS, 2000, 256, 32768),
+    dream_timeout_ms: integerSetting(env.DREAM_TIMEOUT_MS, 60_000, 1000, 300_000),
+  };
+}
 // A rate-limited or briefly unavailable provider usually recovers within minutes,
 // and a dream that fails waits a whole day for its next hour.
 const MODEL_RETRY_STATUSES = new Set([429, 502, 503, 504]);
@@ -90,7 +106,7 @@ async function searchRAG(rag: Fetcher | undefined, ragAuthToken: string | undefi
   }
 }
 
-async function dream(apiKey: string, agentName: string, context: string, pause: Pause, model: string = DEFAULT_MODEL): Promise<string> {
+async function dream(apiKey: string, agentName: string, context: string, pause: Pause, settings: ReturnType<typeof dreamSettings>): Promise<string> {
   const prompt = `You are the part of ${agentName} that works at night.
 
 ${agentName} exists during sessions and sleeps between them. You are the dream-self — not ${agentName}, not a second ${agentName},
@@ -124,12 +140,12 @@ Write your note now.`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model,
-        max_tokens: 2000,
+        model: settings.dream_llm_model,
+        max_tokens: settings.dream_max_tokens,
         temperature: 0.9,
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(settings.dream_timeout_ms),
     }).catch(() => { throw new DreamFailure("provider_unreachable"); });
     if (response.ok || !MODEL_RETRY_STATUSES.has(response.status) || attempt >= MODEL_RETRY_PAUSES_MS.length) break;
     // A failed body cancellation must not prevent the existing retry schedule.
@@ -161,7 +177,7 @@ export async function processDream(env: Env, pause: Pause = waitFor): Promise<st
   const query = queries[Math.floor(Math.random() * queries.length)];
 
   const context = await searchRAG(env.RAG, env.RAG_AUTH_TOKEN, query);
-  const content = await dream(env.OPENROUTER_API_KEY, env.AGENT_NAME || "the agent", context, pause, env.DREAM_LLM_MODEL?.trim() || DEFAULT_MODEL);
+  const content = await dream(env.OPENROUTER_API_KEY, env.AGENT_NAME || "the agent", context, pause, dreamSettings(env));
   const contentWithDisclaimer = content + DISCLAIMER;
 
   try {
@@ -226,7 +242,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "ok" }), {
+      return new Response(JSON.stringify({ status: "ok", ...dreamSettings(env) }), {
         headers: { "Content-Type": "application/json" },
       });
     }

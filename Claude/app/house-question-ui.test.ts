@@ -314,6 +314,7 @@ export function questionHarness(fetch: any, clock = Date) {
   class Bubble {
     className = "";
     dataset: any = {};
+    style: any = {};
     listeners: Record<string, any> = {};
     card: any;
     html = "";
@@ -341,6 +342,7 @@ export function questionHarness(fetch: any, clock = Date) {
     }
     querySelector(selector: string) {
       if (selector === "[data-house-question]") return this.card;
+      if (selector === ".voice-play-btn") return {};
       return null;
     }
     remove() { const i = nodes.indexOf(this); if (i >= 0) nodes.splice(i, 1); }
@@ -355,16 +357,18 @@ export function questionHarness(fetch: any, clock = Date) {
       const instance = /data-house-history="([^"]*)"/.exec(selector)?.[1];
       return cards().find(card => card.dataset.houseHistory === instance);
     },
-    querySelectorAll: (selector: string) => selector === "[data-house-history]"
-      ? cards().filter(card => "houseHistory" in card.dataset)
-      : cards().flatMap(card => card.deadline ? [card.deadline] : []),
+    querySelectorAll: (selector: string) => selector === ".message[data-message-ts]"
+      ? nodes.filter(node => "messageTs" in node.dataset)
+      : selector === "[data-house-history]"
+        ? cards().filter(card => "houseHistory" in card.dataset)
+        : cards().flatMap(card => card.deadline ? [card.deadline] : []),
     addEventListener: (_event: string, handler: any) => { click = handler; },
   };
   const document = { visibilityState: "visible", createElement: () => new Bubble() };
   const shell = source.slice(source.indexOf("  function createMessageBubble("), source.indexOf("  function addMessage("));
   const body = source.slice(source.indexOf("  let houseQuestionVersion ="), source.indexOf("  function updateApproval(id, status)"));
   const api = new Function("messagesEl", "t", "escapeHtml", "escapeAttr", "fetch", "setInterval", "scrollToBottom", "atBottom", "document", "formatTime", "Date",
-    shell + body + "return { refreshHouseQuestion, updateHouseQuestion, updateHouseQuestionHistory, createMessageBubble };")(
+    shell + body + "return { refreshHouseQuestion, updateHouseQuestion, updateHouseQuestionHistory, createMessageBubble, positionClosedHouseQuestions };")(
     messagesEl, translate, escapeHtml, escapeHtml, fetch,
     (fn: any, ms: number) => timers.push({ fn, ms }), (force: boolean) => follows.push(force), () => following, document,
     (ts: any) => { formatted.push(ts); return `formatted:${ts}`; }, clock,
@@ -489,7 +493,7 @@ test("permission deadline counts down and closed history survives refresh withou
   cards()[0].deadline.dataset.houseDeadline = String(Date.now() - 1);
   timers.find(t => t.ms === 1000).fn();
   expect(oldButton.disabled).toBe(true);
-  data = { question: null, history: [{ ...q, closed: true }] };
+  data = { question: null, history: [{ ...q, closed: true, ts: new Date().toISOString() }] };
   await api.refreshHouseQuestion();
   expect(cards()).toHaveLength(1);
   expect(nodes).toHaveLength(1);
@@ -502,7 +506,7 @@ test("permission deadline counts down and closed history survives refresh withou
   // Even a stale synthetic button on the closed card is not a submission.
   await click({ target: { closest: () => ({ disabled: false, closest: () => cards()[0] }) } });
   expect(requests).toEqual([]);
-  data.history.push({ ...q, instance: "auto-process:2", closed: true, answerLabel: "No" });
+  data.history.push({ ...q, instance: "auto-process:2", closed: true, answerLabel: "No", ts: new Date().toISOString() });
   await api.refreshHouseQuestion();
   expect(cards()).toHaveLength(2);
   expect(cards()[1].html).toContain("Answer given: No");
@@ -529,16 +533,17 @@ test("every question shape uses the assistant shell and keeps its first appearan
     expect(nodes).toEqual([bubble]);
     expect(formatted).toEqual([firstSeen, firstSeen]);
     expect(bubble.innerHTML).toEndWith(`<span class="time">formatted:${firstSeen}</span>`);
-    api.updateHouseQuestionHistory([{ ...q, closed: true }]);
+    const closed = { ...q, closed: true, ts: new Date(now).toISOString() };
+    api.updateHouseQuestionHistory([closed]);
     api.updateHouseQuestion(null);
     expect(nodes).toHaveLength(1);
     expect(nodes[0].className).toBe("message assistant");
     expect(cards()[0].closest(".message")).toBe(nodes[0]);
-    expect(nodes[0].innerHTML).not.toContain('class="time"');
+    expect(nodes[0].innerHTML).toContain(`formatted:${closed.ts}`);
     expect(nodes[0].innerHTML).not.toContain("<button");
     expect(nodes[0].dataset.msgId).toBeUndefined();
     expect(nodes[0].listeners).toEqual({});
-    api.updateHouseQuestionHistory([{ ...q, closed: true }]);
+    api.updateHouseQuestionHistory([closed]);
     expect(nodes).toHaveLength(1);
     expect(JSON.stringify(q)).toBe(original);
   }
@@ -549,20 +554,20 @@ test("closed history formats only stored timestamps and never turns expiry into 
   const base = { id: "history", text: "Choose?", options: [], closed: true, expiresAt: 1760000090000, deadlineAt: 1760000080000 };
   const timestamps = [undefined, "2026-11-13T09:15:00Z", 1760000000000, "not a date"];
   api.updateHouseQuestionHistory(timestamps.map((ts, i) => ({ ...base, ts, instance: `process:${i + 1}` })));
-  expect(nodes).toHaveLength(4);
+  expect(nodes).toHaveLength(2);
   expect(formatted).toEqual([timestamps[1], timestamps[2]]);
-  for (const index of [0, 3]) expect(nodes[index].innerHTML).not.toContain('class="time"');
-  for (const index of [1, 2]) expect(nodes[index].innerHTML).toEndWith(`<span class="time">formatted:${timestamps[index]}</span>`);
+  expect(nodes[0].innerHTML).toEndWith(`<span class="time">formatted:${timestamps[2]}</span>`);
+  expect(nodes[1].innerHTML).toEndWith(`<span class="time">formatted:${timestamps[1]}</span>`);
 });
 
-test("closing replaces the open bubble in place between chat messages; a new instance gets a new time", async () => {
+test("closing positions the bubble by server time between chat messages; a new instance gets a new time", async () => {
   let now = 1760000000000;
   class Clock extends Date { static now() { return now; } }
   const q = { id: "same-text", instance: "process:1", text: "Choose?", options: [{ number: 1, label: "Yes" }] };
   let data: any = { question: q, history: [] };
   const { api, nodes, cards, follows, setFollowing } = questionHarness(async () => Response.json(data), Clock);
-  const before = api.createMessageBubble("assistant", "Earlier message", null);
-  const after = api.createMessageBubble("user", "Later message", null);
+  const before = api.createMessageBubble("assistant", "Earlier message", "2026-11-13T09:14:00Z");
+  const after = api.createMessageBubble("user", "Later message", "2026-11-13T09:16:00Z");
   nodes.push(before);
   await api.refreshHouseQuestion();
   expect(follows).toEqual([true]);
@@ -584,12 +589,12 @@ test("closing replaces the open bubble in place between chat messages; a new ins
   expect(nodes).toHaveLength(4);
   expect(cards()).toHaveLength(2);
   expect(nodes[2]).toBe(after);
-  data = { question: null, history: [closed, { ...data.question, closed: true }] };
+  data = { question: null, history: [closed, { ...data.question, closed: true, ts: "2026-11-13T09:17:00Z" }] };
   setFollowing(true);
   await api.refreshHouseQuestion();
   expect(nodes).toHaveLength(4);
   expect(nodes[3].card.dataset.houseHistory).toBe("process:2");
-  expect(nodes[3].innerHTML).not.toContain('class="time"');
+  expect(nodes[3].innerHTML).toContain('formatted:2026-11-13T09:17:00Z');
   expect(follows.at(-1)).toBe(true);
 });
 
@@ -598,7 +603,7 @@ test("the approval message path uses the same shell but alone attaches message I
   const section = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
   let actionCalls = 0;
   const add = new Function("env", `
-    const { document, messagesEl, createMessageBubble, escapeHtml, escapeAttr, t, addKeptActions } = env;
+    const { document, messagesEl, createMessageBubble, positionClosedHouseQuestions, escapeHtml, escapeAttr, t, addKeptActions } = env;
     const messageIds = new Set(), approvalStates = new Map(); let lastSeenTs;
     const safeMediaUrl = () => '', safeMsgId = id => id, renderMarkdown = text => text, withMedia = content => content;
     const showTyping = () => {}, workingEl = null, atBottom = () => true, scrollToBottom = () => {};
@@ -606,7 +611,7 @@ test("the approval message path uses the same shell but alone attaches message I
     ${section('  function renderApprovalCard(', '  function mailApprovalLabel(')}
     ${section('  function addMessage(', '  function addVoiceMessage(')}
     return addMessage;
-  `)({ document: h.document, messagesEl: h.messagesEl, createMessageBubble: h.api.createMessageBubble, escapeHtml, escapeAttr: escapeHtml,
+  `)({ document: h.document, messagesEl: h.messagesEl, createMessageBubble: h.api.createMessageBubble, positionClosedHouseQuestions: h.api.positionClosedHouseQuestions, escapeHtml, escapeAttr: escapeHtml,
     t: translate, addKeptActions: () => { actionCalls++; } });
   add("assistant", "Run command", "2026-11-13T09:15:00Z", "message-one", null, null, null, null,
     { source: "approval", approval_id: "approval-one", detail: "printf hello" });
@@ -621,6 +626,109 @@ test("the approval message path uses the same shell but alone attaches message I
   expect(h.nodes[1].dataset.msgId).toBeUndefined();
   expect(h.nodes[1].listeners).toEqual({});
   expect(actionCalls).toBe(1);
+});
+
+test("undated legacy history stays hidden on reload with or without an open card", async () => {
+  const legacy = { id: "legacy", instance: "old:1", text: "Bash command", options: [], closed: true, submitted: true, answerLabel: "Yes", expiresAt: Date.now() + 1000 };
+  const open = { id: "open", instance: "current:1", text: "Choose?", options: [{ number: 1, label: "Yes" }] };
+  for (const question of [null, open]) {
+    for (let reload = 0; reload < 2; reload++) {
+      const h = questionHarness(async () => Response.json({ question, history: [legacy] }));
+      const message = h.api.createMessageBubble("assistant", "Newest message", "2026-11-19T10:00:00Z");
+      h.nodes.push(message);
+      await h.api.refreshHouseQuestion();
+      const active = h.nodes[1];
+      await h.api.refreshHouseQuestion();
+      expect(h.nodes).toHaveLength(question ? 2 : 1);
+      expect(h.nodes[0]).toBe(message);
+      expect(h.cards().some(card => "houseHistory" in card.dataset)).toBe(false);
+      if (question) {
+        expect(h.nodes[1]).toBe(active);
+        expect(h.cards()[0].querySelectorAll()[0].disabled).toBe(false);
+      }
+    }
+  }
+});
+
+test("closure time replaces first-seen placement and history leaves a trailing active card intact", () => {
+  const h = questionHarness(() => {});
+  const q = { id: "closing", instance: "process:1", text: "Choose?", options: [{ number: 1, label: "Yes" }] };
+  h.api.updateHouseQuestion(q, false);
+  const message = h.api.createMessageBubble("assistant", "Message before closure", "2026-11-13T09:14:00Z");
+  h.nodes.push(message);
+  h.api.updateHouseQuestionHistory([{ ...q, closed: true, ts: "2026-11-13T09:15:00Z" }]);
+  expect(h.nodes[0]).toBe(message);
+  expect(h.nodes[1].card.dataset.houseHistory).toBe("process:1");
+  h.api.updateHouseQuestion({ ...q, id: "open", instance: "process:2" }, false);
+  const active = h.nodes[2];
+  const unchanged = active.innerHTML;
+  h.api.updateHouseQuestionHistory([{ ...q, instance: "older:1", closed: true, ts: "2026-11-13T09:13:00Z" }]);
+  expect(h.nodes.map(node => node.card?.dataset.houseInstance || "message")).toEqual(["older:1", "message", "process:1", "process:2"]);
+  expect(h.nodes.at(-1)).toBe(active);
+  expect(active.innerHTML).toBe(unchanged);
+  expect(active.card.querySelectorAll()[0].disabled).toBe(false);
+});
+
+test("closed cards sort between timestamped messages across refresh and fresh reload", async () => {
+  const base = { id: "same", text: "Choose?", options: [], closed: true };
+  const first = { ...base, instance: "process:1", ts: "2026-11-13T09:15:00Z" };
+  const second = { ...base, instance: "process:2", ts: "2026-11-13T09:16:00Z" };
+  const third = { ...base, instance: "process:3", ts: "2026-11-13T09:18:00Z" };
+  const history = [third, second, first];
+  for (let reload = 0; reload < 2; reload++) {
+    const h = questionHarness(async () => Response.json({ question: null, history }));
+    const before = h.api.createMessageBubble("user", "Earlier", "2026-11-13T09:14:00Z");
+    const middle = h.api.createMessageBubble("assistant", "Middle", "2026-11-13T09:17:00Z");
+    const after = h.api.createMessageBubble("assistant", "Later", "2026-11-13T09:19:00Z");
+    h.nodes.push(before, middle, after);
+    await h.api.refreshHouseQuestion();
+    const ordered = [...h.nodes];
+    expect(h.nodes.map(node => node.card?.dataset.houseInstance || node.innerHTML.split("<")[0]))
+      .toEqual(["Earlier", "process:1", "process:2", "Middle", "process:3", "Later"]);
+    await h.api.refreshHouseQuestion();
+    expect(h.nodes).toEqual(ordered);
+    expect(h.cards().every(card => !card.html.includes("<button"))).toBe(true);
+  }
+});
+
+test("late text and voice messages re-position closed history without moving the open card", () => {
+  const h = questionHarness(() => {});
+  const messageCode = source.slice(source.indexOf("  function createMessageBubble("), source.indexOf("  function formatDuration("));
+  const add = new Function("env", `
+    const { document, messagesEl, escapeHtml, t } = env;
+    const escapeAttr = escapeHtml, messageIds = new Set(), approvalStates = new Map(); let lastSeenTs;
+    const window = {}, safeMediaUrl = url => url || '', safeMsgId = id => id;
+    const renderMarkdown = text => text, withMedia = content => content;
+    const showTyping = () => {}, workingEl = null, atBottom = () => true, scrollToBottom = () => {};
+    const addKeptActions = () => {}, formatTime = ts => ts, formatDuration = () => '0:01';
+    ${messageCode}
+    return addMessage;
+  `)({ document: h.document, messagesEl: h.messagesEl, escapeHtml, t: translate });
+  const q = { id: "closed", instance: "process:1", text: "Choose?", options: [], closed: true, ts: "2026-11-13T09:15:00Z" };
+  h.api.updateHouseQuestionHistory([q]);
+  h.api.updateHouseQuestion({ ...q, closed: undefined, id: "active", instance: "process:2" }, false);
+  const active = h.nodes[1];
+  add("user", "Earlier voice", "2026-11-13T09:14:00Z", "earlier", null, "/voice.webm", 1);
+  add("assistant", "Newer text", "2026-11-13T09:16:00Z", "newer");
+  add("user", "Newer voice", "2026-11-13T09:17:00Z", "voice", null, "/next.webm", 1);
+  // Message arrival order and the active card are unchanged. No closed card follows a newer message.
+  expect(h.nodes[0]).toBe(active);
+  const closed = h.nodes.find(node => node.card?.dataset.houseHistory === "process:1");
+  const newer = h.nodes.find(node => node.dataset.msgId === "newer");
+  const voice = h.nodes.find(node => node.dataset.msgId === "voice");
+  expect(h.nodes.indexOf(closed)).toBeGreaterThan(h.nodes.indexOf(h.nodes.find(node => node.dataset.msgId === "earlier")));
+  expect(h.nodes.indexOf(closed)).toBeLessThan(h.nodes.indexOf(newer));
+  expect(h.nodes.indexOf(closed)).toBeLessThan(h.nodes.indexOf(voice));
+  expect(voice.dataset.messageTs).toBe(String(Date.parse("2026-11-13T09:17:00Z")));
+  expect(h.nodes.find(node => node.card?.dataset.houseQuestion === "active")).toBe(active);
+});
+
+test("history ordering changes advance the app stamp and matching offline cache", () => {
+  const page = readFileSync(join(import.meta.dir, "public/index.html"), "utf8");
+  const worker = readFileSync(join(import.meta.dir, "public/sw.js"), "utf8");
+  expect(readAssetStamp(page, "app.js")).toBeGreaterThan(154);
+  expect(readAssetUrl(worker, "app.js")).toBe(readAssetUrl(page, "app.js"));
+  expect(readCacheNumber(worker)).toBeGreaterThan(75);
 });
 
 test("house question card refreshes on reconnect and submits only identity and choice", () => {

@@ -75,8 +75,8 @@ export function startAuthenticatedControlEndpoint(deps: ControlEndpointDeps): un
         }
         if (heads) {
           try { return Response.json(await deps.heads!(url.searchParams.get("refresh") === "1")); }
-          catch (error: any) {
-            deps.log?.({ type: "control_heads_failed", error: String(error?.message ?? error) });
+          catch {
+            deps.log?.({ type: "control_heads_failed", failure: { kind: "unavailable" } });
             return Response.json({ ok: false, error: "heads unavailable" }, { status: 500 });
           }
         }

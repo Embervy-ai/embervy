@@ -121,7 +121,7 @@ function runLook() {
   const stored: Record<string, string> = {};
   const style = { setProperty: (k: string, v: string) => { stored[k] = v; }, removeProperty: (k: string) => { delete stored[k]; } };
   const meta = { content: "#F5F0EB", getAttribute() { return this.content; }, setAttribute(_k: string, v: string) { this.content = v; } };
-  const document = { documentElement: { style }, body: { style }, getElementById: () => ({ textContent: "", remove() {} }), querySelector: () => meta, createElement: () => ({}) };
+  const document = { documentElement: { style }, body: { style }, getElementById: () => ({ textContent: "", remove() {} }), querySelector: (selector: string) => selector === "#header h1" ? null : meta, createElement: () => ({}) };
   let current = "null";
   const run = new Function("document", "localStorage", `${helper}\n${appearanceBody()}\nreturn applyAppearance;`)(document, { getItem: () => current }) as () => void;
   return { stored, meta, apply: (look: object) => { current = JSON.stringify(look); run(); } };

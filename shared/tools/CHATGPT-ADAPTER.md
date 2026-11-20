@@ -160,6 +160,87 @@ own and answers with source links; Brain needs no search tool and no search
 key for that. If Brain is configured with its own `web_search` tool
 (`BRAIN_WEB_SEARCH_*`), the adapter leaves that tool alone and adds nothing.
 
+## Incoming images via Chat Completions
+
+A user message may carry ordered text and image parts in the same turn:
+
+```json
+{"role":"user","content":[{"type":"text","text":"What is in this picture?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}
+```
+
+The adapter forwards these as `input_text` and
+`{ "type": "input_image", "image_url": "data:image/png;base64,..." }`,
+without reordering or fetching the image. Image-only messages and multiple
+images work the same way. String content and text-only lists keep their old
+wire representation (text-only lists are still newline-joined). Images in
+system, assistant or tool messages are rejected with HTTP 400, including
+assistant messages that also contain tool calls. Missing/empty image URLs
+and image block dialects other than Chat Completions `image_url` are rejected.
+
+**Working assumption, not a live verification:** the house's Codex subscription
+endpoint accepts `input_image` with a Data-URL, as used by the existing
+Anthropic converter. Before the real image trial, check the running house
+adapter's `/health`: it must report `route: "codex"`, not `official`. Saved
+credentials determine that route; this change neither switches credentials
+nor substitutes a public API or another vision model. Local/mock tests do
+not prove endpoint acceptance or that the selected head can see an image.
+
+Diagnostics and rough character/token estimates replace image objects with
+only their type and encoded string length; they do not count base64 as prose.
+These estimates are **not** vision-token estimates. Internal prefix hashes
+still distinguish actual image contents.
+
+On both routes, an **image turn** has an image block in the messages **after the
+last completing `assistant` message**. A completing assistant has no nonempty
+`tool_calls` in Chat Completions, or no `tool_use` content block in `/v1/messages`
+(string content counts as having no tool use). Tool-call assistant messages and
+their results remain in the current turn, including multiple consecutive tool
+rounds. If there is no completing assistant, all messages belong to the current
+turn. Nested `tool_result` content counts, even if a later tool result has no image.
+Images in the top-level `system` field always count and are rejected. After a
+completing assistant reply and a new text message, an image only in older history
+does not make the request an image turn; the historical image is still sent to
+the provider.
+
+Local image validation errors and provider failures on image turns use a closed error vocabulary:
+
+| `error.code` | Meaning |
+| --- | --- |
+| `unsupported_image_role` | Image in a non-user Chat Completions message or in the top-level `system` field |
+| `invalid_image_part` | Missing, empty, or non-string `image_url.url` |
+| `unsupported_image_format` | `image` or `input_image` instead of `image_url` |
+| `image_provider_error` | Provider/transport failure on an image turn |
+
+Local errors return HTTP 400 and fixed English messages (`phase: "input"`,
+`status: 400`), even when the rejected image is in older history. Their code comes
+from `ChatInputError`, independently of image-turn detection. Provider failures
+on image turns use a fixed English message and
+`phase: "provider"`; `error.status` is the provider HTTP status when known
+(omitted otherwise). HTTP error statuses are forwarded; stream failures after
+HTTP 200 and failures without a known HTTP status return HTTP 502.
+No provider text, `upstream`, `param`, or `request_id` is exposed on image turns.
+Their error log contains only `code`, `phase`, and `status` (`unknown` if absent).
+Text-only error logs retain the error message, capped at 300 characters, and
+replay-rejection logs retain `String(err).slice(0, 300)`.
+
+An image-turn HTTP 400 never triggers the reasoning-replay fallback: no replay
+retry and no process-wide replay disabling. This also applies to `/v1/messages`
+with new direct image blocks or images nested in new `tool_result` content.
+Requests with images only in older history use the ordinary text-turn behavior:
+a legacy replay-rejection HTTP 400 retries once without reasoning replay and
+disables replay for the process. For these requests only, both replay-rejection
+and terminal error logs replace Base64-like runs of at least 200 characters
+(`[A-Za-z0-9+/=]`) with `[image base64 omitted]` **before** truncating to 300
+characters. Text-only behavior and the official route's existing replay trigger
+behavior are unchanged.
+Malformed JSON cannot be classified as an image turn and uses the ordinary
+text/parser error path.
+
+This is only the adapter leg: the caller must supply the image part. No file
+is opened here. Pipe heads, Brain's `read_file`, `[Image]`/`image_path` channel
+metadata and the existing Anthropic tool-result conversion are unchanged;
+no general-purpose image-viewing tool is added.
+
 ## Official-route preview behavior
 
 The official route always sends `store: false`, `stream: true` and the full
@@ -186,7 +267,7 @@ silently substitute a different model. Neither the catalog nor HTTP 200
 alone proves inference: the probe requires `response.completed` and rejects
 failed, incomplete or interrupted streams.
 
-Official errors retain HTTP status, machine-readable code, parameter and
+For text-only requests, official errors retain HTTP status, machine-readable code, parameter and
 request ID in the existing client error envelopes. The upstream envelope
 shape is retained with string values redacted; free-form upstream bodies
 are not echoed, because they can contain credentials. A plan-limit error
@@ -210,7 +291,7 @@ things decide whether the cache holds in an agentic tool loop:
 2. *Reasoning models want their own reasoning items back.* The adapter
    requests `reasoning.encrypted_content`, keeps the items in memory and
    re-inserts them before the matching tool call or assistant message.
-   If the backend ever rejects that (HTTP 400), the adapter switches the
+   If the backend rejects that on a turn without a new image (legacy HTTP 400 trigger), the adapter switches the
    replay off for the rest of the process and the turn still succeeds.
    Consequence: the first request after an adapter restart misses once.
 

@@ -11,6 +11,10 @@ compatibility_flags = ["nodejs_compat"]
 crons = ["0 * * * *"]
 
 [vars]
+# See ../README.md: Changing the night model.
+# DREAM_LLM_MODEL = "mistralai/mistral-medium-3-5"
+# DREAM_MAX_TOKENS = "2000"
+# DREAM_TIMEOUT_MS = "60000"
 AGENT_NAME = "YOUR-AGENT-NAME"
 DREAM_HOUR = "4"
 DREAM_TIMEZONE = "UTC"

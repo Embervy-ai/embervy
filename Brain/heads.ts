@@ -6,6 +6,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { accountSeamFromEnv } from "./account";
+import type { CatalogState, CatalogStates } from "./head-models";
+import { brainTimezone } from "./time-marks";
+import { detectSubstrateDrift } from "./drift-guard";
 
 export function claudeLoginAvailable(env: Record<string, string | undefined>): boolean {
   const home = env.HOME?.trim() || homedir();
@@ -34,6 +37,7 @@ export interface HeadSpec {
   contextWindow: number;
   pipeEnv: Record<string, string>;
   unavailable: string | null;
+  unavailableReason?: "missing-key";
   effort?: string | null;
 }
 
@@ -102,6 +106,7 @@ export function resolveHead(nameRaw: string, env: Env, transportOverride?: Trans
       };
     }
     case "gpt": {
+      // Point-in-time fallback, not a moving alias; a fresh catalog warns if it is no longer offered.
       const model = pick(env, "BRAIN_GPT_MODEL", "EMBERVY_GPT_MODEL") || "gpt-5.6-terra";
       const window = num(env, "BRAIN_GPT_CONTEXT", num(env, "EMBERVY_GPT_CONTEXT", 1_000_000));
       let port: string;
@@ -142,6 +147,7 @@ export function resolveHead(nameRaw: string, env: Env, transportOverride?: Trans
         name, transport: "pipe", endpoint: base, apiKey: key, model, contextWindow: window,
         pipeEnv: { ...engineEnv(base, key, window), CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(window) },
         unavailable: key ? null : "KIMI_CODE_KEY (or BRAIN_KIMI_API_KEY) is not set",
+        ...(!key ? { unavailableReason: "missing-key" as const } : {}),
       };
     }
     case "glm": {
@@ -397,7 +403,25 @@ export interface HeadChoice {
   models: HeadModel[];
   available: boolean;
   reason: string | null;
+  setup?: "key";
+  setupHidden?: boolean;
+  catalog?: CatalogState;
+  selectedModelMissing?: boolean;
 }
+
+/** Only provider evidence counts, never the configured or fallback menu entries. */
+export function selectedModelMissing(model: string, models: ProbedModel[] | null | undefined, catalog?: CatalogState): boolean {
+  return Boolean(catalog && catalog.updatedAt !== null && !catalog.stale && !catalog.lastFailure && models
+    && !models.some((m) => [m.id, m.resolvedModel].some((id) => id
+      && (!detectSubstrateDrift(model, id).drift || !detectSubstrateDrift(id, model).drift))));
+}
+
+export function selectedModelWarning(name: string, model: string): string {
+  return `warning: ${name} selected model ${model} is not offered in the current catalog; model unchanged`;
+}
+
+// Capability and typed failure are separate: merely being unavailable is not enough.
+const KEY_SETUP_HEADS: ReadonlySet<string> = new Set(["kimi"]);
 
 export function parseModelList(raw: string | undefined): Array<{ id: string; label: string }> {
   if (!raw || !raw.trim()) return [];
@@ -413,6 +437,7 @@ export function headChoices(
   env: Env,
   probed: Partial<Record<string, ProbedModel[]>> = {},
   current?: { name: string; model: string },
+  catalogs: CatalogStates = {},
 ): HeadChoice[] {
   return HEAD_NAMES.filter((name) => name !== "api" || Boolean(env.BRAIN_ENDPOINT)).map((name) => {
     const head = resolveHead(name, env);
@@ -453,7 +478,12 @@ export function headChoices(
     for (const m of asked) add(m, "catalog");
     for (const m of configured) add(m, asked.length ? "more" : "catalog");
     if (!models.length) add({ id: head.model, label: head.model }, "catalog");
-    return { name, label: HEAD_LABELS[name] ?? name, model: head.model, models, available: !head.unavailable, reason: head.unavailable };
+    return { name, label: HEAD_LABELS[name] ?? name, model: head.model, models, available: !head.unavailable, reason: head.unavailable,
+      ...(KEY_SETUP_HEADS.has(name) && head.unavailableReason === "missing-key" ? { setup: "key" as const } : {}),
+      // Presentation only: hiding setup never changes head availability.
+      ...((env.BRAIN_HEAD_SETUP_HIDE ?? "").split(",").some((entry) => entry.trim() === name) ? { setupHidden: true } : {}),
+      ...(!head.unavailable && catalogs[name] ? { catalog: catalogs[name], selectedModelMissing: selectedModelMissing(keep ?? head.model, probed[name], catalogs[name]) } : {}),
+    };
   });
 }
 
@@ -467,6 +497,14 @@ export function headChoicesText(choices: HeadChoice[], current: { name: string; 
     lines.push(`${mark} ${c.name} — ${c.label}${c.available ? `: ${show(catalog)}` : ` — not available: ${c.reason}`}`);
     if (c.available && more.length) lines.push(`    more: ${show(more)}`);
     if (c.name === current.name && !c.models.some((m) => modelMatches(m, current.model))) lines.push(`    active model: ${current.model}`);
+    if (c.available && c.catalog && (c.catalog.stale || c.catalog.lastFailure)) {
+      const zone = brainTimezone();
+      const stamp = c.catalog.updatedAt === null ? "unknown (no successful refresh)"
+        : `${new Date(c.catalog.updatedAt).toLocaleString("en-GB", { timeZone: zone, hour12: false })} (${zone})`;
+      const failure = c.catalog.lastFailure;
+      lines.push(`    list from ${stamp}${failure ? `; last refresh failed (${failure.kind}${failure.status ? `, HTTP ${failure.status}` : ""})` : "; list is stale"}; use /heads refresh`);
+    }
+    if (c.available && c.selectedModelMissing) lines.push(`    ${selectedModelWarning(c.name, c.name === current.name ? current.model : c.model)}`);
   }
   return lines.join("\n");
 }

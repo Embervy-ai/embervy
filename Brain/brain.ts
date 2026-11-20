@@ -40,6 +40,7 @@ import { stdin as input, stdout as output } from "node:process";
 import type { LiveTokensSnapshot } from "./live-tokens";
 import { readPendingUploads, writePendingUploads, type PendingUpload } from "./pending-uploads";
 import { freshZoneCut } from "./fresh-zone";
+import { AppImageTurn, appImageConfig, inboxImageRefs, imageContentChars, imageErrorDiagnostic, type AppImageRef, type RequestMessage } from "./app-images";
 import { splitArchive } from "./rag-split";
 import { ToolRecordPolicy } from "./pipe-canonical";
 import { isCliNoOutputPrompt, ClaudePipe, pipeWatchdogTokens, anthropicUsage, UNKNOWN_MODEL, usageNumber, type PipeUsageSample, type UsageTokens, type UsageSource, type SelfTurnEvent, type SelfTurnKind, type SendResult } from "./claude-pipe";
@@ -47,7 +48,7 @@ import { brainTimezone } from "./time-marks";
 import { ClaudeAuthExpiredError, credentialsPath, credentialsStamp, writeClaudeAuthState, type ClaudeAuthProfile } from "./claude-auth";
 import { firstLoggedAt, firstMessageAtInLog, localDateKey, noteLoggedAt } from "./archive-date";
 import { tr, brainLocale } from "./texts";
-import { approvalMatch, createApprovalSettingsReader, loadApprovalRules } from "./approval-rules";
+import { approvalMatch, createApprovalSettingsReader, loadApprovalRules, ownSkillsWriteEnabled, ownSkillsWriteAllowed, OWN_SKILLS_DENIAL } from "./approval-rules";
 import { catchUpArchiveName, readArchiveLedger, recordArchive, seedArchiveLedger, type ArchiveReceipt } from "./archive-ledger";
 import { houseCheckBlock, houseCheckMessage, runStartupDoctor, type HouseFinding } from "./house-check";
 import { approvalSettingsArg, pipeApprovalMatch, type ApprovalHookOptions } from "./approval-hook";
@@ -60,14 +61,14 @@ import { residentTaskActivity, type ResidentTaskEntry } from "./resident-tasks";
 import { addPin, initialPinsState, listActivePins, PinLimitError, PinTtlError, removePin, renderPinBlock, type PinsState } from "./pins";
 import { loadPinsAny, renderHousePinBlock, savePinsAny, type PinsFormat } from "./pins-house";
 import type { DriftGuardState } from "./drift-guard";
-import { HEAD_NAMES, cachePingMinutes, validateTargetEffort, birthEffort, effortLevelsFor, gptServedModelMatches, headChoices, headChoicesText, catalogModel, headEffortSupport, modelMatches, parseEffort, parseHeadCommand, pipeUnsetEnv, requestEffort, resolveHead, resolveHeadChoice, systemPromptMode, watchdogThresholds, WATCHDOG_CUT_CEILING, type HeadSpec, type Transport, type WatchdogThresholds } from "./heads";
+import { HEAD_NAMES, cachePingMinutes, validateTargetEffort, birthEffort, effortLevelsFor, gptServedModelMatches, headChoices, headChoicesText, selectedModelMissing, selectedModelWarning, catalogModel, headEffortSupport, modelMatches, parseEffort, parseHeadCommand, pipeUnsetEnv, requestEffort, resolveHead, resolveHeadChoice, systemPromptMode, watchdogThresholds, WATCHDOG_CUT_CEILING, type HeadSpec, type Transport, type WatchdogThresholds } from "./heads";
 import {
   appendDueReminders, lateReminders, markRemindersDelivered, readCalendars, readFreshWarning, readPendingReminders, renderSense,
   REMINDER_TAG, reminderEscalationText, weatherCacheFromOpenMeteo, weatherLine, type SenseState, type WeatherCache,
 } from "./sense";
 import { appMcpServer, appBroadcast, appReplySpeech, isAppReplyTool, ApprovalWaits, approvalFailure, channelTag, commitCursor, inboxConsoleLine, isForeignEntry, isPeerTool, isRoomTool, loadCursor, toolCallSpeech, readInbox, saveCursor, inboxBatchBytes, type InboxCursor } from "./app-channel";
 import { createBrainEcho, isBrainEcho } from "./echo";
-import { ModelCatalogCache, modelsListRequest, probeClaudeModels, probeGptModels, probeListModels, type CatalogReadMode, type ModelInfo } from "./head-models";
+import { ModelCatalogCache, modelsListRequest, probeClaudeModels, probeGptModels, probeListModels, type CatalogReadMode, type CatalogFailure, type CatalogStates, type ModelInfo } from "./head-models";
 import { accountSeamFromEnv, type RateLimitInfo } from "./account";
 import { LimitsStore, formatLimitsStatus } from "./limits";
 import { headFile } from "./head-file";
@@ -339,7 +340,7 @@ const CONTROL_TOKEN = process.env.BRAIN_CONTROL_TOKEN ?? "";
 const CONTROL_PORT = Number(process.env.BRAIN_CONTROL_PORT ?? "3910");
 export const PIPE_PROFILE_KEYS = [
   "BRAIN_CLAUDE_SETTINGS", "BRAIN_CLAUDE_SETTING_SOURCES", "BRAIN_CLAUDE_CWD", "BRAIN_CLAUDE_BIN",
-  "BRAIN_PIPE_MCP_CONFIG", "BRAIN_PIPE_PERMISSION", "BRAIN_APPROVAL", "BRAIN_APPROVAL_RULES", "BRAIN_APPROVAL_TOOLS", "BRAIN_APPROVAL_SCRATCH",
+  "BRAIN_PIPE_MCP_CONFIG", "BRAIN_PIPE_PERMISSION", "BRAIN_OWN_SKILLS_WRITE", "BRAIN_APPROVAL", "BRAIN_APPROVAL_RULES", "BRAIN_APPROVAL_TOOLS", "BRAIN_APPROVAL_SCRATCH",
   "BRAIN_ENABLE_TOOLS", "BRAIN_DISALLOWED_TOOLS", "BRAIN_NOTES_DIR", "BRAIN_NOTES_MAX_BYTES",
   "BRAIN_TOOL_RULES_FILE", "BRAIN_CONTEXT_FILE_MAX_BYTES",
   "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
@@ -1746,8 +1747,8 @@ async function loadWakeAndBridge(state: RuntimeState): Promise<void> {
   state.wakeLoaded = true;
 }
 
-export function estimateTokens(message: Message): number {
-  let characters = typeof message.content === "string" ? message.content.length : JSON.stringify(message.content ?? "").length;
+export function estimateTokens(message: { content: unknown; tool_calls?: ToolCall[] }): number {
+  let characters = imageContentChars(message.content);
   if (message.tool_calls) characters += JSON.stringify(message.tool_calls).length;
   return Math.ceil(characters / 3.6);
 }
@@ -1775,27 +1776,56 @@ async function claudeModelsCached(mode: CatalogReadMode = "cached"): Promise<Mod
   const account = vars.name;
   const env: Record<string, string | undefined> = { ...selectedEnv, ...vars.set };
   for (const key of vars.unset) delete env[key];
-  return modelCatalogCache.get(claudeCatalogKey(account), async () => {
+  return modelCatalogCache.get(claudeCatalogKey(account), async (fail) => {
     const models = await probeClaudeModels({ bin: selectedEnv.BRAIN_CLAUDE_BIN || "claude", env });
-    logEvent({ type: "claude_models_probe", account, ok: Boolean(models?.length), count: models?.length ?? 0 });
+    const failure: CatalogFailure | null = models?.length ? null : { kind: "unavailable" };
+    if (failure) fail(failure);
+    logEvent({ type: "claude_models_probe", account, ok: Boolean(models?.length), count: models?.length ?? 0, ...(failure ? { failure } : {}) });
     return models;
   }, mode);
 }
 
-async function listModelsCached(name: string, mode: CatalogReadMode = "cached"): Promise<ModelInfo[] | null> {
+// Resolve the same catalog identity for probes and memory-only status reads.
+function listCatalogTarget(name: string) {
   const env = headEnvironment();
   const head = resolveHead(name, env);
-  // Read the subscription catalog even while the adapter is down, when the menu is most useful.
-  const authFile = name === "gpt" && !head.unavailable
-    ? (env.CHATGPT_AUTH_FILE?.trim() || join(homedir(), ".codex", "auth.json")) : "";
-  const request = name === "gpt" ? null : modelsListRequest(head);
-  if (!request && !(authFile && existsSync(authFile))) return null;
-  const key = `${name} ${request?.url ?? authFile}`;
-  return modelCatalogCache.get(key, async () => {
-    const models = await (request ? probeListModels(request) : probeGptModels(authFile));
-    logEvent({ type: "head_models_probe", head: name, ok: Boolean(models?.length), count: models?.length ?? 0 });
+  const authFile = name === "gpt" ? (env.CHATGPT_AUTH_FILE?.trim() || join(homedir(), ".codex", "auth.json")) : "";
+  const request = modelsListRequest({ ...head, unavailable: null, apiKey: head.apiKey || "unavailable" });
+  if (!request && !authFile) return null;
+  // Keep identity for memory-only status reads, but never probe an unconfigured head.
+  const available = !head.unavailable && (!authFile || existsSync(authFile));
+  return { key: `${name} ${request?.url ?? authFile}`, request, authFile, available };
+}
+
+async function listModelsCached(name: string, mode: CatalogReadMode = "cached"): Promise<ModelInfo[] | null> {
+  const target = listCatalogTarget(name);
+  if (!target?.available) return null;
+  return modelCatalogCache.get(target.key, async (fail) => {
+    let failure: CatalogFailure | null = null;
+    const onFailure = (value: CatalogFailure) => { failure = value; fail(value); };
+    // The subscription list is independent of adapter health. No token refresh or model turn.
+    const models = target.authFile ? await probeGptModels(target.authFile, { onFailure })
+      : await probeListModels(target.request!, { onFailure });
+    logEvent({ type: "head_models_probe", head: name, ok: Boolean(models?.length), count: models?.length ?? 0, ...(failure ? { failure } : {}) });
     return models;
   }, mode);
+}
+
+function catalogKey(name: string): string | null {
+  return name === "claude" ? claudeCatalogKey(ACCOUNT.pipeEnv().name) : listCatalogTarget(name)?.key ?? null;
+}
+
+function catalogStates(): CatalogStates {
+  const states: CatalogStates = {};
+  for (const name of ["claude", "gpt", "grok", "kimi"]) {
+    if (name === "claude") {
+      if (!resolveHead(name, headEnvironment()).unavailable) states[name] = modelCatalogCache.state(claudeCatalogKey(ACCOUNT.pipeEnv().name));
+    } else {
+      const target = listCatalogTarget(name);
+      if (target?.available) states[name] = modelCatalogCache.state(target.key);
+    }
+  }
+  return states;
 }
 
 async function probedCatalogs(refresh = false) {
@@ -1806,7 +1836,7 @@ async function probedCatalogs(refresh = false) {
   if (gpt) probed.gpt = gpt;
   if (grok) probed.grok = grok;
   if (kimi) probed.kimi = kimi;
-  return { claude, probed, catalogsUpdatedAt: modelCatalogCache.updatedAt };
+  return { claude, probed, catalogsUpdatedAt: modelCatalogCache.updatedAt, catalogs: catalogStates() };
 }
 
 function catalogEffortLevels(head: HeadSpec): string[] {
@@ -2571,15 +2601,15 @@ export async function catchUpArchive(): Promise<void> {
   }
 }
 
-function estimatePromptTokens(messages: Message[]): number {
-  return messageTokens(messages);
+function estimatePromptTokens(messages: Array<{ content: unknown; tool_calls?: ToolCall[] }>): number {
+  return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 }
 
 function isRequestTimeout(error: any): boolean {
   return error?.name === "TimeoutError" || error?.name === "AbortError";
 }
 
-async function chatRequest(model: string, messages: Message[], tools: OpenAIToolDef[], head?: HeadSpec, toolChoice?: "auto" | "none", reasoningEffort?: string, usageSource: UsageSource = "turn"): Promise<ChatResponse> {
+async function chatRequest(model: string, messages: RequestMessage<Message>[], tools: OpenAIToolDef[], head?: HeadSpec, toolChoice?: "auto" | "none", reasoningEffort?: string, usageSource: UsageSource = "turn", images?: AppImageTurn): Promise<ChatResponse> {
   const endpoint = head?.endpoint || ENDPOINT;
   const apiKey = head ? head.apiKey : API_KEY;
   if (!endpoint) throw new Error("BRAIN_ENDPOINT is not configured");
@@ -2591,6 +2621,8 @@ async function chatRequest(model: string, messages: Message[], tools: OpenAITool
     tool_choice: tools.length ? (toolChoice ?? "auto") : undefined,
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   };
+  // Request-local, allowlisted text only; the catch must not pass endpoint errors through.
+  let imageDiagnostic = "";
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -2605,8 +2637,17 @@ async function chatRequest(model: string, messages: Message[], tools: OpenAITool
       // only the request watchdog above may abort them.
       timeout: false,
     } as any);
-    if (!response.ok) throw Object.assign(new Error(`model endpoint HTTP ${response.status}: ${toolRecords.diagnostic(await response.text())}`), { status: response.status });
-    const data = await response.json() as ChatResponse;
+    if (!response.ok) {
+      if (images?.hasImages) {
+        imageDiagnostic = imageErrorDiagnostic(await response.json().catch(() => null));
+        throw Object.assign(new Error("image request diagnostic omitted"), { status: response.status });
+      }
+      throw Object.assign(new Error(`model endpoint HTTP ${response.status}: ${toolRecords.diagnostic(await response.text())}`), { status: response.status });
+    }
+    const raw = await response.text();
+    const parsed = JSON.parse(raw);
+    // Normalize JSON escapes before redacting an endpoint's echoed payload.
+    const data = (images?.hasImages ? JSON.parse(images.redact(JSON.stringify(parsed))) : parsed) as ChatResponse;
     logEvent({ ...apiUsageRecord(data, head?.name ?? "api", usageSource) });
     return data;
   } catch (error: any) {
@@ -2615,6 +2656,7 @@ async function chatRequest(model: string, messages: Message[], tools: OpenAITool
       logEvent({ type: "turn_request_timeout", timeout_minutes: REQUEST_TIMEOUT_MIN, model });
       throw new Error(`model request timed out after ${REQUEST_TIMEOUT_MIN} minutes`);
     }
+    if (images?.hasImages) throw Object.assign(new Error(`model image request failed${error?.status ? ` (HTTP ${error.status})` : ""}${imageDiagnostic ? `: ${imageDiagnostic}` : "; diagnostic omitted"}`), { status: error?.status });
     const diagnostic = toolRecords.diagnostic(String(error));
     if (diagnostic !== String(error)) throw Object.assign(new Error(diagnostic), { status: error?.status });
     throw error;
@@ -3115,8 +3157,8 @@ export async function buildPipeSystemPrompt(state: RuntimeState, head: HeadSpec,
 }
 
 /** A pipe must never hang on an unanswered permission prompt: "app" sends it
- * to the approval card, otherwise prompts are denied; "cli" leaves the CLI's
- * default for settings hooks that decide on their own. */
+ * to the approval card; "none" denies except for immediate own-skills writes.
+ * "cli" leaves the CLI's default for settings hooks that decide on their own. */
 export function pipePermissionArgs(mode: string, controlEndpoint: boolean, env: Record<string, string | undefined> = process.env): { permissionPrompts?: "none"; permissionPromptTool?: string; disallowedTools?: string[]; approvalHook?: ApprovalHookOptions } {
   const scratch = env.BRAIN_APPROVAL_SCRATCH === undefined ? {} : { scratch: env.BRAIN_APPROVAL_SCRATCH };
   if (env.BRAIN_APPROVAL_SETTINGS) {
@@ -3132,6 +3174,9 @@ export function pipePermissionArgs(mode: string, controlEndpoint: boolean, env: 
     return { permissionPromptTool: "mcp__brain__approve", disallowedTools: ["AskUserQuestion"], ...(approvalHook ? { approvalHook } : {}) };
   }
   if (mode === "cli") return {};
+  if (mode === "none" && ownSkillsWriteEnabled(env, controlEndpoint)) {
+    return { permissionPromptTool: "mcp__brain__approve" };
+  }
   return { permissionPrompts: "none" };
 }
 
@@ -3607,7 +3652,7 @@ function steerableAppMessages(): QueueItem[] {
   return taken;
 }
 
-async function apiTurn(state: RuntimeState, head: HeadSpec, block: string | null, usageSource: "turn" | "internal" = "turn"): Promise<string> {
+async function apiTurn(state: RuntimeState, head: HeadSpec, block: string | null, usageSource: "turn" | "internal" = "turn", images = new AppImageTurn(appImageConfig(), head.transport)): Promise<string> {
   if (head.unavailable) throw new Error(`head ${head.name} unavailable: ${head.unavailable}`);
   const recovery: GptRecoveryBudget = { used: false, epoch: adapterGate.epoch() };
   const systemPrompt = await apiSystemPrompt(state);
@@ -3621,14 +3666,19 @@ async function apiTurn(state: RuntimeState, head: HeadSpec, block: string | null
   const turnContext = [check, state.inletBlocks[contextIndex] ?? block].filter(Boolean).join("\n\n---\n\n");
   const buildMessages = (visible: Message[]): Message[] => {
     const outgoing = visible.map((message, offset) => {
-      if (state.rolledIndex + offset !== contextIndex || !contextMessage) return message;
-      return check ? { ...contextMessage, content: `${check}\n\n---\n\n${contextMessage.content ?? ""}` } : contextMessage;
+      const original = state.history[state.rolledIndex + offset];
+      const copy = state.rolledIndex + offset === contextIndex && contextMessage
+        ? (check ? { ...contextMessage, content: `${check}\n\n---\n\n${contextMessage.content ?? ""}` } : contextMessage) : message;
+      images.alias(original, copy);
+      return copy;
     });
     return [
       { role: "system", content: systemPrompt },
       // Once its original user anchor is archived, keep only the active
       // context as a request-local user preface, not the archived user text.
       ...(contextIndex < state.rolledIndex && turnContext ? [{ role: "user" as const, content: turnContext }] : []),
+      // Active images (and their caption) survive an intra-turn roll, request-only.
+      ...images.retained(state.history, state.rolledIndex) as Message[],
       ...capBridgeMessage(outgoing, head),
     ];
   };
@@ -3646,7 +3696,9 @@ async function apiTurn(state: RuntimeState, head: HeadSpec, block: string | null
         for (const item of steerableAppMessages()) {
           roomTurn ||= isRoomTurn(item.text);
           peerTurn ||= isPeerTurn(item.text);
-          const steer: Message = { role: "user", content: item.text };
+          const prepared = images.prepare(item.text, item.appImages ?? []);
+          const steer: Message = { role: "user", content: prepared.text };
+          images.bind(steer, prepared.parts);
           messages.push(steer);
           state.history.push(steer);
           logTurn(steer);
@@ -3663,12 +3715,13 @@ async function apiTurn(state: RuntimeState, head: HeadSpec, block: string | null
       }
       const projected = projectForHead(messages, head.model, Boolean(state.drift?.substrateDrift));
       if (projected.event) logEvent({ type: "substrate_projection", ...projected.event, model: head.model });
+      const requestMessages = images.request(projected.messages, messages);
       const response = await withGptRecovery(state, head,
-        () => chatRequest(head.model, projected.messages, toolsForHead(state, head), head, undefined, requestEffort(head, state.effort), usageSource), recovery);
+        () => chatRequest(head.model, requestMessages, toolsForHead(state, head), head, undefined, requestEffort(head, state.effort), usageSource, images), recovery);
       const choice = response.choices?.[0];
       if (!choice?.message) throw new Error("model returned no message");
       state.modelAnswers = (state.modelAnswers ?? 0) + 1;
-      const promptTokens = response.usage?.prompt_tokens ?? estimatePromptTokens(messages);
+      const promptTokens = response.usage?.prompt_tokens ?? estimatePromptTokens(requestMessages);
       state.totalPromptTokens += response.usage?.prompt_tokens ?? promptTokens;
       state.totalCompletionTokens += response.usage?.completion_tokens ?? estimateTokens(choice.message);
       afterModelAnswer(state, head, response.model, promptTokens, null);
@@ -3776,6 +3829,8 @@ function houseMapText(state: RuntimeState): string {
 }
 
 export interface TurnOptions {
+  /** Trusted inbox metadata, never extracted from userText. */
+  appImages?: AppImageRef[];
   skipInlet?: boolean;
   retryMessage?: Message;
   kind?: "user" | "cache_ping" | "internal";
@@ -3794,14 +3849,19 @@ export async function runTurn(state: RuntimeState, userText: string, inletEnable
 
   if (head.transport === "api") await maybeRollToRag(state);
   const block = await buildContextBlock(state, userText, inletEnabled && !opts.skipInlet);
+  const refs = [...(opts.source === "app" ? opts.appImages ?? [] : [])];
   if (drift.modelCall && !opts.retryMessage) {
     const joined = joinLateAppMessages(queue, userText, opts);
     userText = joined.text;
+    refs.push(...joined.items.flatMap((item) => item.appImages ?? []));
     queue.splice(0, joined.items.length);
     for (const item of joined.items) commitAppItem(item);
     if (joined.items.length) logEvent({ type: "app_messages_joined_late", count: joined.items.length });
   }
-  const userMessage: Message = opts.retryMessage ?? { role: "user", content: userText };
+  const images = new AppImageTurn(appImageConfig(), drift.modelCall ? head.transport : "none");
+  const prepared = images.prepare(userText, refs);
+  const userMessage: Message = opts.retryMessage ?? { role: "user", content: prepared.text };
+  images.bind(userMessage, prepared.parts);
   if (opts.kind === "internal" || opts.source === "internal") syntheticInputs.add(userMessage);
   if (drift.modelCall && head.transport === "pipe") {
     return pipeTurn(state, head, userText, block, userMessage, opts.kind === "internal" || opts.source === "internal" ? "internal" : "turn");
@@ -3815,7 +3875,9 @@ export async function runTurn(state: RuntimeState, userText: string, inletEnable
     logTurn(message);
     return hint;
   }
-  return apiTurn(state, head, block, opts.kind === "internal" || opts.source === "internal" ? "internal" : "turn");
+  try {
+    return await apiTurn(state, head, block, opts.kind === "internal" || opts.source === "internal" ? "internal" : "turn", images);
+  } finally { images.clear(); }
 }
 
 /** A bare sentence that keeps the prompt cache warm: no retrieval, no pins,
@@ -3907,6 +3969,7 @@ export function makeInitialState(tools: OpenAIToolDef[]): RuntimeState {
 }
 
 interface QueueItem {
+  appImages?: AppImageRef[];
   kind: "user" | "cache_ping" | "internal" | "command";
   source: "terminal" | "app" | "internal";
   text: string;
@@ -3928,7 +3991,7 @@ export function takeTurnItem(queue: QueueItem[]): QueueItem {
   while (queue.length && queue[0].kind === "user" && queue[0].source === "app" && !queue[0].retryMessage) joined.push(queue.shift()!);
   if (joined.length === 1) return first;
   const last = joined[joined.length - 1];
-  return { ...first, text: joined.map((item) => item.text).join("\n\n"), commitOffset: last.commitOffset, messageId: last.messageId, mergedCount: joined.length };
+  return { ...first, text: joined.map((item) => item.text).join("\n\n"), appImages: joined.flatMap((item) => item.appImages ?? []), commitOffset: last.commitOffset, messageId: last.messageId, mergedCount: joined.length };
 }
 
 export function joinLateAppMessages(queue: readonly QueueItem[], text: string, turn: TurnOptions): { text: string; items: QueueItem[] } {
@@ -4259,7 +4322,10 @@ function statusText(state: RuntimeState): string {
   const pct = state.lastPromptTokens ? Math.round((100 * state.lastPromptTokens) / head.contextWindow) : 0;
   const limits = head.name === "claude" && !head.pipeEnv.ANTHROPIC_BASE_URL
     ? formatLimitsStatus(LIMITS.snapshot(ACCOUNT.name()), brainTimezone()) : null;
+  const key = catalogKey(head.name);
+  const missing = key && selectedModelMissing(head.model, modelCatalogCache.peek(key), modelCatalogCache.state(key));
   return [
+    ...(missing ? [selectedModelWarning(head.name, head.model)] : []),
     `head: ${head.name} (${head.transport}) · model: ${head.model}${state.servedModel ? ` · served: ${state.servedModel}` : ""}${head.unavailable ? ` · UNAVAILABLE: ${head.unavailable}` : ""}`,
     `effort: ${state.effort ?? "default"} · runs as ${effortLabel(state) ?? "the model's default"} (${headEffortSupport(head).via})${state.pendingRebirth ? ` · restart pending (${state.pendingRebirth})` : ""}`,
     `system prompt mode: ${systemPromptMode(head, process.env)}${head.transport === "api" ? " (API: Brain supplies the system message directly)" : ""}`,
@@ -4346,10 +4412,10 @@ export async function handleCommand(state: RuntimeState, line: string, source: "
       return { text: "conversation state cleared" };
     case "/effort": return { text: (await applyEffort(state, argument || undefined, source)).text };
     case "/heads": {
-      const { claude: claudeModels, probed } = await probedCatalogs(argument === "refresh");
+      const { claude: claudeModels, probed, catalogs } = await probedCatalogs(argument === "refresh");
       const head = currentHead(state);
       const current = { name: head.name, model: head.model };
-      return { text: headChoicesText(headChoices(headEnvironment(), probed, current), current) + (claudeModels ? "" : "\n(claude did not report its catalog; configured list shown)") };
+      return { text: headChoicesText(headChoices(headEnvironment(), probed, current, catalogs), current) + (claudeModels ? "" : "\n(claude did not report its catalog; configured list shown)") };
     }
     case "/head": {
       const parsed = parseHeadCommand(argument);
@@ -4468,7 +4534,7 @@ function pollApp(state: RuntimeState, readCursor: { current: InboxCursor }): voi
     const endOffset = read.endOffsets[index];
     const text = String(entry.text ?? "").trim();
     console.log(inboxConsoleLine(entry, APP_USER));
-    const item: QueueItem = { kind: "user", source: "app", text: channelTag(entry, APP_SOURCE, APP_USER), commitOffset: endOffset, messageId: entry.id };
+    const item: QueueItem = { kind: "user", source: "app", text: channelTag(entry, APP_SOURCE, APP_USER), appImages: inboxImageRefs(entry), commitOffset: endOffset, messageId: entry.id };
     // Foreign messages are never the user's commands or the user speaking.
     const command = !isForeignEntry(entry) && text.startsWith("/") && isAppCommand(text);
     if (!command && !isForeignEntry(entry)) personSpokeSinceStart = true;
@@ -4647,7 +4713,7 @@ async function handleItem(state: RuntimeState, item: QueueItem): Promise<void> {
     }
     lastTurnSpeech = { replied: false, prose: "", missing: [] };
     turnStarted = true;
-    const answer = await runTurn(state, item.text, inletOn, { kind: item.kind === "internal" ? "internal" : "user", source: item.source, retryMessage: item.retryMessage, skipInlet: item.skipInlet });
+    const answer = await runTurn(state, item.text, inletOn, { kind: item.kind === "internal" ? "internal" : "user", source: item.source, retryMessage: item.retryMessage, skipInlet: item.skipInlet, appImages: item.appImages });
     turnCompleted = true;
     console.log(`\n${WORKER_NAME}:\n${answer}\n`);
     state.claudeTurnSteers = undefined;
@@ -4865,14 +4931,14 @@ async function collectReminders(): Promise<void> {
 }
 
 export async function loadHeadsSnapshot(state: RuntimeState, refresh = false) {
-  const { claude, probed, catalogsUpdatedAt } = await probedCatalogs(refresh);
-  return headsSnapshot(state, claude, probed, catalogsUpdatedAt);
+  const { claude, probed, catalogsUpdatedAt, catalogs } = await probedCatalogs(refresh);
+  return headsSnapshot(state, claude, probed, catalogsUpdatedAt, catalogs);
 }
 
-export function headsSnapshot(state: RuntimeState, claudeModels: ModelInfo[] | null, others: Partial<Record<string, ModelInfo[]>> = {}, catalogsUpdatedAt: number | null = null) {
+export function headsSnapshot(state: RuntimeState, claudeModels: ModelInfo[] | null, others: Partial<Record<string, ModelInfo[]>> = {}, catalogsUpdatedAt: number | null = null, catalogs: CatalogStates = {}) {
   const head = currentHead(state);
   const current = { name: head.name, model: head.model };
-  const heads = headChoices(headEnvironment(), { ...others, ...(claudeModels ? { claude: claudeModels } : {}) }, current);
+  const heads = headChoices(headEnvironment(), { ...others, ...(claudeModels ? { claude: claudeModels } : {}) }, current, catalogs);
   const running = heads.find((h) => h.name === head.name)?.models.find((m) => modelMatches(m, head.model));
   const effort = effortLevelsFor(head, running);
   return {
@@ -4912,6 +4978,17 @@ export async function handleControlTool(state: RuntimeState, name: string, args:
   }
   if (name === "approve") {
     const toolName = String(args?.tool_name ?? "tool");
+    const env = pipeEnvironment(state);
+    // Pipe policy must not change direct control-tool calls on API heads.
+    if (currentHead(state).transport === "pipe" && !approvalSettings && !env.BRAIN_APPROVAL_SETTINGS
+      && (env.BRAIN_PIPE_PERMISSION ?? "none").toLowerCase() === "none") {
+      const allow = ownSkillsWriteAllowed(toolName, args?.input, env, Boolean(CONTROL_TOKEN));
+      logEvent({ type: "approval_decision", tool: toolName, decision: allow ? "allow" : "deny",
+        wait_ms: 0, via: "pipe", trigger: "own_skills_write" });
+      return { ok: true, text: JSON.stringify(allow
+        ? { behavior: "allow", updatedInput: args.input }
+        : { behavior: "deny", message: OWN_SKILLS_DENIAL }) };
+    }
     const detail = JSON.stringify(toolRecords.input(toolName, args?.tool_use_id, args?.input ?? {}), null, 2).slice(0, 1500);
     const match = pipeApprovalMatch(approvalSettings?.() ?? APPROVAL_RULES, APPROVAL_MODE, toolName, args?.input ?? {}, { cwd: pipeEnvironment(state).BRAIN_CLAUDE_CWD ?? HERE, scratch: pipeEnvironment(state).BRAIN_APPROVAL_SCRATCH ?? "" });
     if (approvalSettings && !match) return { ok: true, text: JSON.stringify({ behavior: "allow", updatedInput: args?.input ?? {} }) };

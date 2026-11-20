@@ -454,6 +454,110 @@ function menuSurface(extraRequest?: string) {
   return { controls, elements, refresh, requests, change, fixture, load, texts, all, body };
 }
 
+describe("Brain key setup surface", () => {
+  const raw = (name = "kimi", available = false, setup: unknown = "key") => ({ ...RAW,
+    heads: [...RAW.heads, { name, label: name, available, reason: "translated arbitrary reason", setup, models: [] }],
+  });
+  test("only the advertised, supported missing-key head has Set up; no string matching", async () => {
+    const ui = menuSurface();
+    for (const data of [raw(), raw("kimi", true), raw("kimi", false, null), raw("glm"), raw("constructor"), RAW,
+      { restartOnly: true, current: { headLabel: "Claude Code" }, heads: [] }]) {
+      await ui.load(shapeBrainHeads(data) || data);
+      const expected = data.heads.some((h: any) => h.name === "kimi" && !h.available && h.setup === "key");
+      expect(ui.texts().includes("brainMenu.key.setup")).toBe(expected);
+      expect(ui.texts().some(text => /remove/i.test(text))).toBe(false);
+      expect(ui.all(ui.body).filter(n => n.tagName === "section" && n.children[0]?.textContent === "kimi")).toHaveLength(expected ? 1 : 0);
+    }
+  });
+  test("hidden setup never hides an available head from the Head selector", async () => {
+    const ui = menuSurface();
+    for (const available of [false, true]) {
+      const source = raw("kimi", available, available ? null : "key");
+      Object.assign(source.heads.at(-1)!, { setupHidden: true });
+      await ui.load(shapeBrainHeads(source));
+      expect(ui.texts()).not.toContain("brainMenu.key.setup");
+      expect(ui.all(ui.body).filter(n => n.tagName === "section" && n.children[0]?.textContent === "kimi")).toHaveLength(0);
+      const selector = ui.all(ui.body).find(n => n.tagName === "select" && n.attrs["aria-label"] === "brainMenu.head")!;
+      const option = selector.children.find(n => n.value === "kimi")!;
+      expect(option.disabled).toBe(!available);
+      expect(option.textContent).toBe(available ? "kimi" : "brainMenu.unavailable");
+      expect(option.textContent).not.toContain("brainMenu.key.setup");
+    }
+  });
+  test("password form cancels cleanly, saves through its own route, and trusts the refreshed Brain list", async () => {
+    const ui = menuSurface();
+    const data = shapeBrainHeads(raw())!;
+    await ui.load(data);
+    const button = (text: string) => ui.all(ui.body).find(n => n.tagName === "button" && n.textContent === text)!;
+    button("brainMenu.key.setup").listeners.click!();
+    const input = ui.all(ui.body).find(n => n.tagName === "input")! as any;
+    expect(input.type).toBe("password");
+    expect(input.autocomplete).toBe("off");
+    expect(input.className).toBe("bm-input");
+    const save = button("brainMenu.key.save");
+    const cancel = button("brainMenu.key.cancel");
+    const row = ui.all(ui.body).find(n => n.children.includes(save))!;
+    expect(row.children).toContain(cancel);
+    expect(row.className.split(/\s+/)).toContain("approval-actions");
+    expect(save.className.split(/\s+/)).toContain("bm-apply");
+    expect(save.className.split(/\s+/)).toContain("approval-allow");
+    expect(cancel.className.split(/\s+/)).not.toContain("approval-allow");
+    // Bind the built row to the actual CSS: the secondary-only Brain rule
+    // must not match Save, and the reused primary override must follow its base.
+    const css = readFileSync(join(import.meta.dir, "public/style.css"), "utf8");
+    expect(css).toMatch(/\.brain-menu-actions button\s*\{[^}]*background: var\(--bg\)/);
+    expect(ui.all(ui.body).filter(n => n.className.split(/\s+/).includes("brain-menu-actions") && ui.all(n).includes(save))).toHaveLength(0);
+    expect(css).toMatch(/\.approval-actions\s*\{[^}]*gap: 10px/);
+    expect(css).toMatch(/\.approval-actions button\s*\{[^}]*background: transparent/);
+    expect(css).toContain(".approval-actions .approval-allow { background: var(--accent); color: var(--on-accent); }");
+    expect(css.indexOf(".approval-actions .approval-allow {")).toBeGreaterThan(css.indexOf(".approval-actions button {"));
+    expect(ui.texts()).toContain("brainMenu.key.kimiSource");
+    expect(ui.texts()).toContain("brainMenu.key.privacy");
+    expect(ui.all(ui.body).some(n => n.tagName === "a")).toBe(false);
+    input.value = "NOT-A-REAL-UI-KEY";
+    button("brainMenu.key.cancel").listeners.click!();
+    expect(input.value === "").toBe(true);
+    expect(ui.all(ui.body).some(n => n.tagName === "input")).toBe(false);
+    expect(ui.requests.length).toBe(1);
+    button("brainMenu.key.setup").listeners.click!();
+    const second = ui.all(ui.body).find(n => n.tagName === "input")!;
+    second.value = "NOT-A-REAL-UI-KEY";
+    const saving = button("brainMenu.key.save").listeners.click!();
+    expect(second.value === "").toBe(true);
+    const request = ui.requests.at(-1)!;
+    expect(request.path).toBe("/api/brain/key-setup/kimi/save");
+    expect(request.init.method).toBe("POST");
+    expect(request.init.credentials).toBe("include");
+    expect(JSON.parse(String(request.init.body)).key === "NOT-A-REAL-UI-KEY").toBe(true);
+    request.resolve(Response.json({ ok: true, effective: "Effective on head switch" }));
+    for (let i = 0; i < 20 && ui.requests.at(-1) === request; i++) await Bun.sleep(1);
+    expect(ui.requests.at(-1)!.path).toBe("/api/brain/heads");
+    // A stale or overridden Brain can still report unavailable. Never invent success.
+    ui.requests.at(-1)!.resolve(Response.json(data));
+    await saving;
+    expect(ui.controls.data().heads.find((h: any) => h.name === "kimi").available).toBe(false);
+    expect(ui.texts()).toContain("brainMenu.key.setup");
+    expect(ui.texts().some(t => t.includes("NOT-A-REAL-UI-KEY"))).toBe(false);
+
+    button("brainMenu.key.setup").listeners.click!();
+    const finalInput = ui.all(ui.body).find(n => n.tagName === "input")!;
+    finalInput.value = "NOT-A-REAL-UI-KEY";
+    const saved = button("brainMenu.key.save").listeners.click!();
+    const saveRequest = ui.requests.at(-1)!;
+    saveRequest.resolve(Response.json({ ok: true, effective: "Effective on head switch" }));
+    for (let i = 0; i < 20 && ui.requests.at(-1) === saveRequest; i++) await Bun.sleep(1);
+    expect(ui.requests.at(-1)!.path).toBe("/api/brain/heads");
+    ui.requests.at(-1)!.resolve(Response.json(shapeBrainHeads(raw("kimi", true, null))));
+    await saved;
+    expect(ui.texts()).not.toContain("brainMenu.key.setup");
+    expect(ui.all(ui.body).filter(n => n.tagName === "section" && n.children[0]?.textContent === "kimi")).toHaveLength(0);
+    const selector = ui.all(ui.body).find(n => n.tagName === "select" && n.attrs["aria-label"] === "brainMenu.head")!;
+    expect(selector.children.find(n => n.value === "kimi")!.disabled).toBe(false);
+    expect(finalInput.value === "").toBe(true);
+    expect(ui.texts().some(t => /remove|NOT-A-REAL-UI-KEY/i.test(t))).toBe(false);
+  });
+});
+
 describe("Brain menu refresh surface", () => {
   test("house loads are allowed but an extra Brain request still breaks the exact contract", async () => {
     const expected = ["/api/brain/heads"];

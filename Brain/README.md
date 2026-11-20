@@ -105,6 +105,35 @@ ends the loop for good (exit 75); a vanished session restarts. Attach with
 
 ## Heads (`BRAIN_HEAD`, `/head`, `/heads`)
 
+**Kimi key setup in the app.** In a Brain house, a Kimi head missing only its
+key offers **Set up**. Paste the Coding-plan key from the **Kimi Code Console**;
+the password form does not send a chat message or store the key in browser
+storage. The app verifies it once with `GET https://api.kimi.com/coding/v1/usages`
+(`Authorization: Bearer`, 10-second deadline, no model call). A 401 rejects it;
+network errors, other statuses and an unreadable usage response leave the file
+unchanged. Only a signed human session cookie can save it: the agent
+bearer and same-host trust cannot. Claude-Code houses have no key setup.
+
+The app atomically replaces `KIMI_CODE_KEY` in `Brain/brain.env` (or the explicit
+`BRAIN_ENV_FILE`) using the existing private credential writer, mode 0600.
+`/heads` rereads the file immediately; switching to Kimi uses the new key without
+a prior cut. An already running Kimi pipe is unchanged: cut or switch away and
+back to replace its credential. After saving, the menu reloads: Kimi is selectable
+under **Head**, and its setup section disappears. External overrides, fallback
+env files, or `BRAIN_NO_ENV_FILE=1` can still make the actual head list differ;
+the app always shows Brain's response.
+The `setup: "key"` menu capability comes from Brain's typed missing-key reason;
+only Kimi is enabled, not GLM.
+
+The human sets up a key-based head in the Brain menu. Changing or removing a
+key is the agent's job, on the human's request: edit the `KIMI_CODE_KEY` line in
+`Brain/brain.env` (or the explicit `BRAIN_ENV_FILE`), not through chat. Removing
+that line does not revoke the provider credential or remove external overrides.
+To hide setup sections, the agent sets `BRAIN_HEAD_SETUP_HIDE=kimi` in the same
+file: a comma-separated list of head names, with unknown names ignored. Brain
+rereads it for `/heads` and reports `setupHidden`; the app hides only setup,
+never an available head. This works for any head that advertises setup.
+
 | Head | Transport | How it thinks | Needs |
 |---|---|---|---|
 | `claude` | pipe | unmodified `claude -p` (stream-json); Claude Code runs its own tool loop with the MCP servers, hooks and skills of `BRAIN_CLAUDE_CWD`; the house's prompt comes from `BRAIN_SYSTEM` | a logged-in Claude subscription (`BRAIN_CLAUDE_LOGIN_CHECK=1` makes the head unavailable until the credentials file exists) |

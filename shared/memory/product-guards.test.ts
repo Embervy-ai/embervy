@@ -4,6 +4,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "../..");
+
+test("memory product version matches the root VERSION", async () => {
+  const { PRODUCT_VERSION } = await import("./src/index");
+  expect(PRODUCT_VERSION).toBe(readFileSync(resolve(root, "VERSION"), "utf8").trim());
+});
 function sources(dir: string): string[] {
   return readdirSync(resolve(root, dir), { withFileTypes: true }).flatMap(entry => {
     if (["node_modules", ".git", "logs", "state", "data", "backups", "installer"].includes(entry.name)) return [];

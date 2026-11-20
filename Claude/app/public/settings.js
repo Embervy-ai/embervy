@@ -159,7 +159,8 @@ function phoneChoices(values) {
     if (palette && !manualLook.has(key)) { delete out[key]; continue; }
     if (!palette && same(values[key], initial[key])) continue;
     delete out[key];
-    if (!same(values[key], DEFAULTS[key])) out[key] = values[key];
+    // An explicit shared choice is not a snapshot of a device's computed defaults.
+    if (window.embervyHouseLook.fields.includes(key) || !same(values[key], DEFAULTS[key])) out[key] = values[key];
   }
   out.features = values.features;
   out.speechLang = values.speechLang;
@@ -308,7 +309,7 @@ function applyPreset(preset) {
   $("agent-color").value = preset.agent;
   $("title-color").value = preset.title;
   setLook(suggestLook(preset.bg, preset.user));
-  setBgMode("color");
+  // A device palette must not turn off the house's photo.
   markActivePreset();
 }
 
@@ -424,7 +425,37 @@ $("bg-photo-input").addEventListener("change", (e) => {
   reader.readAsDataURL(file);
 });
 
+// Do not let a late load overwrite edits to the shared fields.
+const sharedControls = [$("house-look-btn"), $("title-text"), $("title-font"), $("bg-photo-btn"), ...document.querySelectorAll("#bg-mode button")];
+sharedControls.forEach((input) => { input.disabled = true; });
+const houseLookReady = window.embervyHouseLook.sync(choices).then((received) => {
+  const next = { ...received };
+  delete choices.bgPhotoVersion;
+  if (next.bgPhotoVersion) choices.bgPhotoVersion = next.bgPhotoVersion;
+  for (const key of window.embervyHouseLook.fields) {
+    delete choices[key];
+    if (Object.hasOwn(next, key)) choices[key] = next[key];
+    s[key] = Object.hasOwn(next, key) ? next[key] : DEFAULTS[key];
+    initial[key] = s[key];
+  }
+  $("title-text").value = s.titleText;
+  $("title-font").value = s.titleFont;
+  bgPhotoData = s.bgPhoto;
+  suggestFromStoredPhoto = false;
+  setBgMode(s.bgMode);
+  showPhotoPreview(false);
+  refreshAgentLabel();
+  try { localStorage.setItem(KEY, JSON.stringify(next)); } catch {}
+}).catch(() => { /* Keep the local look when the house cannot be reached. */ })
+  .finally(() => sharedControls.forEach((input) => { input.disabled = false; }));
+let savingLook = false;
 $("save-btn").addEventListener("click", async () => {
+  if (savingLook) return;
+  savingLook = true;
+  $("save-btn").disabled = true;
+  try {
+  await houseLookReady;
+  $("house-look-btn").disabled = true;
   const out = {
     bgMode: s.bgMode,
     bgColor: $("bg-color").value,
@@ -437,7 +468,7 @@ $("save-btn").addEventListener("click", async () => {
     userAlpha: +$("user-alpha").value,
     agentColor: $("agent-color").value,
     agentAlpha: +$("agent-alpha").value,
-    titleText: ($("title-text").value || "").trim() || "Embervy",
+    titleText: ($("title-text").value || "").trim(),
     titleFont: $("title-font").value,
     titleColor: $("title-color").value,
     speechLang: $("speech-lang").value,
@@ -456,40 +487,55 @@ $("save-btn").addEventListener("click", async () => {
     },
   };
   let previous;
+  let next = phoneChoices(out);
+  const restore = () => {
+    if (previous === null) localStorage.removeItem(KEY);
+    else localStorage.setItem(KEY, previous);
+  };
   try {
     previous = localStorage.getItem(KEY);
-    // Check local storage first so a quota failure cannot leave the server preference changed.
-    localStorage.setItem(KEY, JSON.stringify(phoneChoices(out)));
+    // Preflight quota without exposing an uncommitted choice during network requests.
+    localStorage.setItem(KEY, JSON.stringify(next));
+    restore();
   } catch {
     alert(t("settings.saveFailed"));
     return;
   }
+  const terminalSettings = (features) => fetch("/api/terminal/settings", {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: features.terminal_panel, input_enabled: features.terminal_input }),
+  });
   try {
-    const response = await fetch("/api/terminal/settings", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: out.features.terminal_panel, input_enabled: out.features.terminal_input }),
-    });
+    const response = await terminalSettings(out.features);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
   } catch {
-    // Keep UI and server state aligned when the server rejects the change.
-    try {
-      if (previous === null) localStorage.removeItem(KEY);
-      else localStorage.setItem(KEY, previous);
-    } catch {}
     alert(t("settings.terminalFailed"));
     return;
   }
+  try {
+    next = await window.embervyHouseLook.save(next);
+  } catch {
+    // The appearance commit failed: keep device choices, and undo the earlier terminal change.
+    try { await terminalSettings(initial.features); } catch {}
+    alert(t("settings.houseFailed"));
+    return;
+  }
+  try { localStorage.setItem(KEY, JSON.stringify(next)); }
+  catch { alert(t("settings.saveFailed")); return; }
   await applyPushFeature(out.features.push);
   window.location.href = "/";
+  } finally {
+    savingLook = false;
+    $("save-btn").disabled = false;
+    $("house-look-btn").disabled = false;
+  }
 });
 
 
 $("house-look-btn")?.addEventListener("click", () => {
   try {
     const stored = load();
-    for (const key of APPEARANCE_FIELDS) delete stored[key];
+    for (const key of APPEARANCE_FIELDS) if (!window.embervyHouseLook.fields.includes(key)) delete stored[key];
     localStorage.setItem(KEY, JSON.stringify(stored));
   } catch {
     alert(t("settings.saveFailed"));
