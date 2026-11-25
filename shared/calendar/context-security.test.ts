@@ -97,7 +97,8 @@ test("inlet gate diagnostics count queries rather than logging private searches"
   const source = readFileSync(join(repo, "Claude/scripts/inlet-worker.ts"), "utf8");
   const code = source.slice(source.indexOf("  if (!top.length) {"), source.indexOf("  // The expansion helper"));
   const logs: string[] = [];
-  new Function("top", "sorted", "turnFloor", "queries", "console", code)([], [{ score: 0.1 }], 0.2, [{ q: "PRIVATE person subject" }], { error: (line: string) => logs.push(line) });
+  // The worker writes through its own logger, which adds the time; the gate's text is what matters here.
+  new Function("top", "sorted", "turnFloor", "queries", "workerLog", code)([], [{ score: 0.1 }], 0.2, [{ q: "PRIVATE person subject" }], (line: string) => logs.push(line));
   expect(logs).toHaveLength(1);
   expect(logs[0]).toContain("queries=1");
   expect(logs[0]).not.toContain("PRIVATE");

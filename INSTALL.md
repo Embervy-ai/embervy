@@ -2211,6 +2211,7 @@ EMBERVY_API_KEY=<memory-api-key>
 RAG_URL=https://embervy-chronicle.<your-account>.workers.dev
 RAG_AUTH_TOKEN=<rag-auth-token>
 OPENROUTER_API_KEY=<classifier-api-key>
+INLET_PROVIDER_IGNORE=
 ```
 
 Use the keys from steps 2 and 3; omit `OPENROUTER_API_KEY` in the degraded
@@ -2220,6 +2221,19 @@ chunk cache. Empty output or `BYPASS` means no retrieval this turn; a
 configured worker failure is logged and the turn proceeds without an
 inlet, not with a second fallback search. Without a configured worker,
 Brain uses its simpler built-in memory/RAG search instead.
+
+`INLET_PROVIDER_IGNORE` is an optional comma-separated list of OpenRouter
+providers to exclude from the first classifier request onward (default: empty;
+whitespace, empty entries and duplicates are removed). Empty or non-JSON content,
+or an answer without a usable query, gets one retry within the original
+15-second classifier budget, adding the first
+provider to the exclusions when known; less than one second remaining skips the
+retry. In Claude Code, set this option in the root `.env` instead. Every worker
+stderr line has an ISO UTC timestamp after its bracketed prefix (such as
+`[inlet/classifier]`, `[inlet/thoughts]`, `[inlet/rag]` or `[inlet/time]`), or at
+the start if there is no prefix. Unusable classifier replies log only provider/finish
+metadata and the reason (`empty` or `no_queries`), and successful retries log
+`recovered` with both providers.
 
 **Check:** After First start, send a new app question about a fact actually
 stored in the archive, then run:

@@ -165,14 +165,17 @@ test("the wait for the ears grows with the recording and is passed on as deadlin
     expect((await send(app.base, app.cookie, "100")).status).toBe(200);
     expect((await send(app.base, app.cookie, "4")).status).toBe(200);
     expect((await send(app.base, app.cookie, "1000")).status).toBe(200);
-    expect(ears.seen.map((s) => s.deadline_s)).toEqual([280, 45, 600]);
+    // The app passes on what is left of the wait, so a busy machine reports a few milliseconds less.
+    expect(ears.seen.map((s) => Math.ceil(s.deadline_s))).toEqual([280, 45, 600]);
+    for (const [i, full] of [280, 45, 600].entries()) expect(full - ears.seen[i].deadline_s).toBeLessThan(1);
   } finally {
     await app.stop();
   }
   const capped = await startApp({ EMBERVY_HEAR_URL: ears.url, EMBERVY_VOICE_MESSAGES: "1", EMBERVY_HEAR_WAIT_MAX: "120", EMBERVY_HEAR_WAIT_PER_SECOND: "nonsense" });
   try {
     expect((await send(capped.base, capped.cookie, "40")).status).toBe(200);
-    expect(ears.seen.at(-1)?.deadline_s).toBe(120);
+    expect(Math.ceil(ears.seen.at(-1)!.deadline_s)).toBe(120);
+    expect(120 - ears.seen.at(-1)!.deadline_s).toBeLessThan(1);
   } finally {
     await capped.stop();
     ears.stop();

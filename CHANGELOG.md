@@ -2,6 +2,13 @@
 
 Embervy uses [semantic versioning](https://semver.org/). The current version is in `VERSION`. Installed houses receive updates as letters, and every letter names the changes it carries.
 
+## 1.0.4 (2026-11-25)
+
+### Inlet
+
+- The inlet's query step survives a provider that ignores its settings. The step asks a small model through OpenRouter for the search queries of a turn. One of the providers behind the default model spent the whole answer on reasoning and returned empty content, so the turn ran "without its query step" and searched with the raw message only. An empty or non-JSON answer, or an answer without a usable query, is now asked once more within the same 15-second budget, with the provider of the first answer excluded. `INLET_PROVIDER_IGNORE` (comma-separated, empty by default) excludes providers from the first request onward.
+- Every line the inlet worker writes to its log carries a UTC time after its bracketed prefix. An unusable answer names its provider, finish reason and kind (`empty` or `no_queries`), never content.
+
 ## 1.0.3 (2026-11-20)
 
 ### Brain

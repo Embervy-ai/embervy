@@ -281,7 +281,7 @@ describe("the time words of the language file (strings.local.json) reach the wor
 
   test("a broken entry is logged and skipped; the rest of the file still works", async () => {
     const r = await run("¿Qué pasó el martes pasado?", newWorker, { EMBERVY_STRINGS_LOCAL: languageFile({ ...SPANISH, yesterday: ["ayer", "{nope}"] }) });
-    expect(r.stderr).toContain('[inlet/time] timeWords.yesterday: "{nope}" has an unknown slot {nope} — skipped');
+    expect(r.stderr).toMatch(/^\[inlet\/time\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z timeWords\.yesterday: "\{nope\}" has an unknown slot \{nope\} — skipped$/m);
     expect(r.stdout).toContain('Time window Tue 2026-09-29 ("el martes pasado")');
   });
 });

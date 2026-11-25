@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   findThoughts, parseThoughts, renderThoughts, sameThought, selectThoughts, thoughtCandidates,
-  thoughtKey, thoughtQueries, thoughtSettings, type Thought,
+  thoughtCalibration, thoughtKey, thoughtQueries, thoughtSettings, type Thought,
 } from "./inlet-thoughts.ts";
 
 const heading = "## Thoughts (memory): your own earlier conclusions, the state of that moment, not the truth";
@@ -204,7 +204,7 @@ for (const failure of ["nonsense", "envelope", "http", "rpc", "partial", "timeou
     const off = await run({ env: { INLET_THOUGHTS: "0" } });
     const result = await run({ failure });
     expect(result.stdout).toBe(off.stdout);
-    expect(result.stderr.trim()).toBe("[inlet/thoughts] queries=2 candidates=[]");
+    expect(result.stderr).toMatch(/^\[inlet\/thoughts\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z queries=2 candidates=\[\]\n$/);
     if (failure.includes("timeout")) {
       expect(result.elapsed).toBeGreaterThanOrEqual(7900);
       expect(result.elapsed).toBeLessThan(11000);
@@ -221,9 +221,13 @@ for (const options of [
     const off = await run({ ...options, env: { INLET_THOUGHTS: "0" } });
     expect(searches(result)).toEqual([]);
     expect(result.stdout).toBe(off.stdout);
-    expect(result.stderr).toContain("[inlet/thoughts] queries=0 candidates=[]");
+    expect(result.stderr).toMatch(/^\[inlet\/thoughts\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z queries=0 candidates=\[\]$/m);
   });
 }
+
+test("the calibration helper returns its original text without a timestamp", () => {
+  expect(thoughtCalibration(2, [event()])).toBe('[inlet/thoughts] queries=2 candidates=[{"id":101,"score":0.8}]');
+});
 
 test("calibration logs at most five numeric candidates and never message, query or event text", async () => {
   const marker = "SECRET_CALIBRATION_CANARY";

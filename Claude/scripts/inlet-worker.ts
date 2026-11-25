@@ -20,10 +20,19 @@ import {
   thoughtCandidates, thoughtKey, thoughtQueries, thoughtSettings, type Thought,
 } from "./inlet-thoughts.ts";
 
+function workerLog(message: string): void {
+  // Keep bracketed prefixes at the start; both harnesses persist stderr verbatim.
+  for (const line of message.split("\n")) {
+    const timestamp = new Date().toISOString();
+    console.error(line.replace(/^(\[[^\]\r\n]+\])?/, (_, prefix) =>
+      prefix ? `${prefix} ${timestamp}` : `${timestamp} `));
+  }
+}
+
 const THOUGHTS_ENABLED = process.env.INLET_THOUGHTS === "1";
 let thoughtQueryCount = 0;
 let calibrationCandidates: Thought[] = [];
-if (THOUGHTS_ENABLED) process.on("exit", () => console.error(thoughtCalibration(thoughtQueryCount, calibrationCandidates)));
+if (THOUGHTS_ENABLED) process.on("exit", () => workerLog(thoughtCalibration(thoughtQueryCount, calibrationCandidates)));
 
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
 const EMBERVY_KEY = envValue("EMBERVY_API_KEY") || "";
@@ -35,6 +44,7 @@ const filenameScope = FILENAME_PREFIX ? { filenamePrefix: FILENAME_PREFIX } : {}
 const inFilenameScope = (r: any): boolean => !FILENAME_PREFIX ||
   (typeof r?.filename === "string" && r.filename.startsWith(FILENAME_PREFIX));
 const MODEL = process.env.INLET_MODEL || "qwen/qwen3.5-9b";
+const PROVIDER_IGNORE = [...new Set((process.env.INLET_PROVIDER_IGNORE || "").split(",").map(name => name.trim()).filter(Boolean))];
 const DIVERSITY_ENABLED = process.env.INLET_DIVERSITY?.trim() !== "0";
 const USER_LABEL = process.env.USER_LABEL || "User";
 const AGENT_LABEL = process.env.AGENT_LABEL || process.env.SYNTH_LABEL || "Agent";
@@ -78,7 +88,7 @@ const TIME_WORDS = temporalEnabled() ? (() => {
   try { return loadTimeWords(); }
   catch (e) { return { vocabulary: ENGLISH, warnings: [`the language file's timeWords could not be read (${(e as Error)?.message ?? e}) — English only`] }; }
 })() : null;
-for (const warning of TIME_WORDS?.warnings ?? []) console.error(`[inlet/time] ${warning}`);
+for (const warning of TIME_WORDS?.warnings ?? []) workerLog(`[inlet/time] ${warning}`);
 const TEMPORAL: TemporalQuery | null = TIME_WORDS
   ? parseTemporal(prompt, temporalNow(), temporalTimeZone(), TIME_WORDS.vocabulary)
   : null;
@@ -191,77 +201,110 @@ type Classification = {
 
 const DEGRADED_NOTICE = "(Memory search ran without its query step this turn; results come from the raw message and may be less precise.)";
 let classifierDegraded = false;
+function classifierMetadata(value: unknown): string {
+  // Provider metadata is untrusted too: keep it bounded and on a single log line.
+  return JSON.stringify(typeof value === "string" && value.trim() ? value.trim().slice(0, 160) : "unknown");
+}
 function classifierFailure(reason: string): null {
   classifierDegraded = true;
-  console.error(`[inlet/classifier] ${reason}`);
+  workerLog(`[inlet/classifier] ${reason}`);
   return null;
+}
+
+function cleanClassification(parsed: any): Classification {
+  const persons = Array.isArray(parsed.persons)
+    ? Array.from(new Set(parsed.persons.filter(currentEntity)))
+    : [];
+  const places = Array.isArray(parsed.places)
+    ? Array.from(new Set(parsed.places.filter(currentEntity)))
+    : [];
+  const rag_queries: RagQuery[] = [];
+  const rawQ = Array.isArray(parsed.rag_queries)
+    ? parsed.rag_queries
+    : typeof parsed.rag_query === "string"
+      ? [parsed.rag_query]
+      : [];
+  for (const item of rawQ) {
+    if (typeof item === "string" && item.trim()) {
+      rag_queries.push({ q: item.trim() });
+    } else if (item && typeof item.q === "string" && item.q.trim()) {
+      const cat =
+        typeof item.cat === "string" && CATEGORIES.includes(item.cat)
+          ? item.cat
+          : undefined;
+      rag_queries.push({ q: item.q.trim(), cat });
+    }
+  }
+  const turn_category =
+    typeof parsed.turn_category === "string" && CATEGORIES.includes(parsed.turn_category)
+      ? parsed.turn_category
+      : undefined;
+  return {
+    persons,
+    places,
+    turn_category,
+    rag_queries: rag_queries.slice(0, 4),
+  };
 }
 
 async function classify(): Promise<Classification | null> {
   if (!OPENROUTER_KEY) return null;
   let stage = "request failure";
+  const deadline = performance.now() + 15_000;
   const signal = AbortSignal.timeout(15_000);
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: CLASSIFY_SYSTEM_PROMPT },
-          { role: "user", content: classifyPrompt },
-        ],
-        response_format: { type: "json_object" },
-        max_tokens: 400,
-        temperature: 0,
-        reasoning: { enabled: false },
-      }),
-      signal,
-    });
-    if (!res.ok) return classifierFailure(`status ${res.status}`);
-    stage = "parse failure";
-    const data = (await res.json()) as any;
-    const content = data?.choices?.[0]?.message?.content;
-    const jsonMatch = typeof content === "string" ? content.match(/\{[\s\S]*\}/) : null;
-    if (!jsonMatch) return classifierFailure("parse failure");
-    const parsed = JSON.parse(jsonMatch[0]);
-    const persons = Array.isArray(parsed.persons)
-      ? Array.from(new Set(parsed.persons.filter(currentEntity)))
-      : [];
-    const places = Array.isArray(parsed.places)
-      ? Array.from(new Set(parsed.places.filter(currentEntity)))
-      : [];
-    const rag_queries: RagQuery[] = [];
-    const rawQ = Array.isArray(parsed.rag_queries)
-      ? parsed.rag_queries
-      : typeof parsed.rag_query === "string"
-        ? [parsed.rag_query]
-        : [];
-    for (const item of rawQ) {
-      if (typeof item === "string" && item.trim()) {
-        rag_queries.push({ q: item.trim() });
-      } else if (item && typeof item.q === "string" && item.q.trim()) {
-        const cat =
-          typeof item.cat === "string" && CATEGORIES.includes(item.cat)
-            ? item.cat
-            : undefined;
-        rag_queries.push({ q: item.q.trim(), cat });
-      }
-    }
-    const turn_category =
-      typeof parsed.turn_category === "string" && CATEGORIES.includes(parsed.turn_category)
-        ? parsed.turn_category
-        : undefined;
-    if (!rag_queries.length) return classifierFailure("parse failure");
-    return {
-      persons,
-      places,
-      turn_category,
-      rag_queries: rag_queries.slice(0, 4),
+    const ignore = new Set(PROVIDER_IGNORE);
+    const body = {
+      model: MODEL,
+      messages: [
+        { role: "system", content: CLASSIFY_SYSTEM_PROMPT },
+        { role: "user", content: classifyPrompt },
+      ],
+      response_format: { type: "json_object" },
+      max_tokens: 400,
+      temperature: 0,
+      reasoning: { enabled: false },
     };
+    let classification: Classification | null = null;
+    let firstProvider: unknown;
+    let provider: unknown;
+    let recovered = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      stage = "request failure";
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ...body, ...(ignore.size ? { provider: { ignore: [...ignore] } } : {}) }),
+        // One signal covers both requests and their response bodies, not a fresh timeout per attempt.
+        signal,
+      });
+      if (!res.ok) return classifierFailure(`status ${res.status}`);
+      stage = "parse failure";
+      const data = (await res.json()) as any;
+      provider = data?.provider;
+      const content = data?.choices?.[0]?.message?.content;
+      const jsonMatch = typeof content === "string" ? content.match(/\{[\s\S]*\}/) : null;
+      let parsed: any;
+      if (jsonMatch) {
+        try { parsed = JSON.parse(jsonMatch[0]); } catch { /* No usable JSON object. */ }
+      }
+      classification = parsed ? cleanClassification(parsed) : null;
+      if (classification?.rag_queries.length) {
+        recovered = attempt === 1;
+        break;
+      }
+      workerLog(`[inlet/classifier] unusable response provider=${classifierMetadata(provider)} finish_reason=${classifierMetadata(data?.choices?.[0]?.finish_reason)} reason="${parsed ? "no_queries" : "empty"}"`);
+      // A provider may ignore reasoning:false and spend the entire output budget on reasoning.
+      // Try another provider once, but do not start with less than one second left in the same budget.
+      if (attempt === 1 || signal.aborted || deadline - performance.now() < 1_000) return classifierFailure("parse failure");
+      firstProvider = provider;
+      if (typeof provider === "string" && provider.trim()) ignore.add(provider.trim());
+    }
+    if (recovered) workerLog(`[inlet/classifier] recovered first_provider=${classifierMetadata(firstProvider)} provider=${classifierMetadata(provider)}`);
+    return classification;
   } catch (error) {
     const timeout = signal.aborted || (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name));
     return classifierFailure(timeout ? "timeout" : stage);
@@ -490,7 +533,7 @@ async function ragSearch(
 
   if (!top.length) {
     const topScore = sorted.length ? (sorted[0].score ?? 0).toFixed(3) : "none";
-    console.error(
+    workerLog(
       `[inlet/rag] confidence gate suppressed all hits; turnFloor=${turnFloor} topScore=${topScore} queries=${queries.length}`,
     );
     return null;

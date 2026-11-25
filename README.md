@@ -268,6 +268,11 @@ inlet searches the raw prompt without classification or person/place
 lookups, and the daemon and dream pipeline stay unavailable. INSTALL.md
 describes this degraded mode and which key lines to omit.
 
+For the inlet classifier, `INLET_PROVIDER_IGNORE` (empty by default) is a
+comma-separated list of OpenRouter providers to exclude from the first request
+onward. Empty or non-JSON content, or an answer without a usable query, is retried
+once within the same 15-second budget, excluding the first provider when known.
+
 ## Repo layout
 
 ```

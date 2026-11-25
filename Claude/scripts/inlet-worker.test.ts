@@ -2,6 +2,16 @@ import { test, expect } from 'bun:test';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, symlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { loadTimeWords } from './inlet-temporal.ts';
+
+const workerTimestamp = /^(\[[^\]\r\n]+\] )?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+function withoutWorkerTimestamps(stderr: string): string {
+  expect(stderr).toEndWith('\n');
+  return stderr.slice(0, -1).split('\n').map(line => {
+    expect(line).toMatch(workerTimestamp);
+    return line.replace(workerTimestamp, '$1');
+  }).join('\n') + '\n';
+}
 
 type ContextOptions = {
   recent?: string; message?: string; failure?: string; root?: string;
@@ -25,7 +35,7 @@ async function contextRun(options: ContextOptions = {}) {
         if (failure === 'timeout') throw new DOMException('DO NOT LOG ERROR', 'TimeoutError');
         if (failure === 'transport') throw new Error('DO NOT LOG ERROR');
         if (failure === 'envelope') return new Response('DO NOT LOG RESPONSE');
-        const content = failure === 'parse' ? 'not json' : failure === 'empty' ? '{}' : JSON.stringify({
+        const content = failure === 'parse' ? 'not json' : failure === 'empty' ? '' : failure === 'no_queries' ? '{}' : JSON.stringify({
           persons: ['speaker', 'earlier speaker'], places: ['venue', 'earlier venue'],
           rag_queries: [{q: 'storage decision', cat: 'technical'}], turn_category: 'technical',
         });
@@ -86,18 +96,52 @@ test('a pronoun follow-up uses recent query context without looking up stale ent
   expect(result.calls.filter(call => call.path === '/lookup')).toEqual([]);
 });
 
+test('a successful classifier turn timestamps RAG and exit calibration without changing their text', async () => {
+  const result = await contextRun({ hits: [], env: { INLET_THOUGHTS: '1' } });
+  expect(withoutWorkerTimestamps(result.stderr)).toBe(
+    '[inlet/rag] confidence gate suppressed all hits; turnFloor=0.25 topScore=none queries=1\n' +
+    '[inlet/thoughts] queries=2 candidates=[]\n');
+});
+
+test('time warnings and unprefixed continuation lines are timestamped only by the worker', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'inlet-log-time-'));
+  const file = join(root, 'strings.local.json');
+  const env = { INLET_TEMPORAL: '1', EMBERVY_STRINGS_LOCAL: file };
+  try {
+    writeFileSync(file, JSON.stringify({ timeWords: { yesterday: ['{nope}'], 'filler\ncontinuation': [] } }));
+    const warnings = loadTimeWords(env).warnings;
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toBe('timeWords.yesterday: "{nope}" has an unknown slot {nope} — skipped');
+    expect(warnings[1]).toContain('\ncontinuation');
+    const result = await contextRun({ root, env });
+    expect(result.stderr.trim().split('\n')).toHaveLength(3);
+    expect(withoutWorkerTimestamps(result.stderr)).toBe(warnings.map(warning => `[inlet/time] ${warning}\n`).join(''));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 const notice = '(Memory search ran without its query step this turn; results come from the raw message and may be less precise.)';
 for (const [failure, reason] of [
   ['status', 'status 503'], ['timeout', 'timeout'], ['transport', 'request failure'],
-  ['parse', 'parse failure'], ['empty', 'parse failure'], ['envelope', 'parse failure'],
+  ['parse', 'parse failure'], ['empty', 'parse failure'], ['no_queries', 'parse failure'], ['envelope', 'parse failure'],
 ]) {
   test(`classifier ${failure} emits one safe notice and searches the raw message`, async () => {
     const result = await contextRun({failure});
     expect(result.stdout.split('\n')[0]).toBe(notice);
     expect(result.stdout.split(notice)).toHaveLength(2);
     expect(result.stdout).toContain('retrieved context');
-    expect(result.stderr.trim()).toBe(`[inlet/classifier] ${reason}`);
-    expect(result.stderr.length).toBeLessThan(100);
+    const retried = failure === 'parse' || failure === 'empty' || failure === 'no_queries';
+    const unusable = `unusable response provider="unknown" finish_reason="unknown" reason="${failure === 'no_queries' ? 'no_queries' : 'empty'}"`;
+    const messages = retried ? [unusable, unusable, reason] : [reason];
+    const lines = result.stderr.trim().split('\n');
+    expect(lines).toHaveLength(messages.length);
+    const logPrefix = /^\[inlet\/classifier\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+    for (const [index, line] of lines.entries()) {
+      expect(line).toMatch(logPrefix);
+      const withoutTimestamp = line.replace(logPrefix, '[inlet/classifier] ');
+      expect(withoutTimestamp).toBe(`[inlet/classifier] ${messages[index]}`);
+      expect((withoutTimestamp + '\n').length).toBeLessThan(120);
+    }
+    expect(result.calls.filter(call => call.path.endsWith('/completions'))).toHaveLength(retried ? 2 : 1);
     expect(result.stderr).not.toContain('DO NOT LOG');
     expect(result.stderr).not.toContain('offline');
     expect(result.calls.find(call => call.path === '/search').body.query).toBe('What did speaker say about venue?');
