@@ -2,6 +2,12 @@
 
 Embervy uses [semantic versioning](https://semver.org/). The current version is in `VERSION`. Installed houses receive updates as letters, and every letter names the changes it carries.
 
+## 1.0.5 (2026-11-25)
+
+### App
+
+- A house that runs its own push relay can name its host in `EMBERVY_PUSH_RELAY_HOSTS` (comma-separated, exact host names, HTTPS only). Since 1.0.0 the app accepts push subscriptions only from the browser push services of Apple, Google, Mozilla and Microsoft and skips stored subscriptions to any other host, so a self-run relay was refused with 400 and went silent. Without the setting nothing changes. IP addresses, localhost and wildcards are ignored. The app needs a restart after the setting changes.
+
 ## 1.0.4 (2026-11-25)
 
 ### Inlet

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acceptedPushEndpoint } from "./push-endpoint";
+import { acceptedPushEndpoint, pushRelayHosts } from "./push-endpoint";
 
 describe("acceptedPushEndpoint", () => {
   for (const host of [
@@ -173,5 +173,45 @@ describe("authenticated push subscription", () => {
     expect(readFileSync(file, "utf8")).toBe(stored);
     expect((await subscribe(sub)).status).toBe(200);
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual([sub]);
+  });
+});
+
+describe("EMBERVY_PUSH_RELAY_HOSTS", () => {
+  test("a relay host is rejected unless the house names it", () => {
+    expect(acceptedPushEndpoint("https://relay.example.org/relay/room/token", [])).toBe(false);
+    expect(acceptedPushEndpoint("https://relay.example.org/relay/room/token", pushRelayHosts("relay.example.org"))).toBe(true);
+  });
+
+  test("the match is the exact host: no subdomains, no suffixes, HTTPS only", () => {
+    const hosts = pushRelayHosts(" Relay.Example.org , other.example.net ");
+    expect(hosts).toEqual(["relay.example.org", "other.example.net"]);
+    expect(acceptedPushEndpoint("https://RELAY.example.org/x", hosts)).toBe(true);
+    for (const url of [
+      "https://a.relay.example.org/x",
+      "https://relay.example.org.evil.test/x",
+      "https://evilrelay.example.org/x",
+      "http://relay.example.org/x",
+      "https://user@relay.example.org/x",
+    ]) expect(acceptedPushEndpoint(url, hosts)).toBe(false);
+  });
+
+  test("entries that are not plain DNS names are ignored", () => {
+    expect(pushRelayHosts("127.0.0.1, localhost, [::1], *.example.org, example.org:8443, https://example.org, example.org/path, 10.0.0.1, 169.254.169.254, ,")).toEqual([]);
+    for (const host of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "localhost"]) {
+      expect(acceptedPushEndpoint(`https://${host}/token`, pushRelayHosts(host))).toBe(false);
+    }
+  });
+
+  test("the setting is read from the environment at call time", () => {
+    const before = process.env.EMBERVY_PUSH_RELAY_HOSTS;
+    try {
+      delete process.env.EMBERVY_PUSH_RELAY_HOSTS;
+      expect(acceptedPushEndpoint("https://relay.example.org/x")).toBe(false);
+      process.env.EMBERVY_PUSH_RELAY_HOSTS = "relay.example.org";
+      expect(acceptedPushEndpoint("https://relay.example.org/x")).toBe(true);
+      expect(acceptedPushEndpoint("https://fcm.googleapis.com/x")).toBe(true);
+    } finally {
+      if (before === undefined) delete process.env.EMBERVY_PUSH_RELAY_HOSTS; else process.env.EMBERVY_PUSH_RELAY_HOSTS = before;
+    }
   });
 });
