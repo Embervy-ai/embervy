@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acceptedPushEndpoint, pushRelayHosts } from "./push-endpoint";
@@ -105,7 +105,8 @@ describe("authenticated push subscription", () => {
     listener.stop(true);
     if (port === 3030) throw new Error("refusing to test on port 3030");
     base = `http://127.0.0.1:${port}`;
-    server = Bun.spawn(["bun", "run", join(import.meta.dir, "server.ts")], {
+    const log = openSync(join(dir, "server.log"), "w");
+    server = Bun.spawn([process.execPath, "run", join(import.meta.dir, "server.ts")], {
       cwd: dir,
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -116,12 +117,14 @@ describe("authenticated push subscription", () => {
         EMBERVY_APP_DATA_DIR: dataDir,
         APP_PASSWORD: password,
         APP_SESSION_SECRET: "push-endpoint-test-session-secret",
+        EXTERNAL_PUSH_TOKEN: "push-endpoint-test-external-token",
         EMBERVY_TERMINAL_PANEL: "0",
         EMBERVY_TMUX_SESSION: "push-endpoint-test-no-such-session",
       },
-      stdout: "ignore",
-      stderr: "ignore",
+      stdout: log,
+      stderr: log,
     });
+    closeSync(log);
     let up = false;
     for (let i = 0; i < 100 && !up; i++) {
       try { up = (await fetch(`${base}/health`)).ok; } catch {}
@@ -173,6 +176,36 @@ describe("authenticated push subscription", () => {
     expect(readFileSync(file, "utf8")).toBe(stored);
     expect((await subscribe(sub)).status).toBe(200);
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual([sub]);
+  });
+
+  test("stored rejected subscriptions produce one count-only warning per process, not per message", async () => {
+    const file = join(dataDir, "push-subscriptions.json");
+    const broadcast = async () => {
+      const response = await fetch(`${base}/api/external/broadcast`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer push-endpoint-test-external-token" },
+        body: JSON.stringify({ text: "Push warning test" }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+    };
+    const log = () => readFileSync(join(dir, "server.log"), "utf8");
+    const warning = "stored push subscriptions are skipped";
+    writeFileSync(file, "[]");
+    await broadcast();
+    expect(log()).not.toContain(warning);
+
+    const endpoint = "https://relay.example.org/push/invented-private-token";
+    const stored = JSON.stringify([{ endpoint }, { endpoint: `${endpoint}-second` }]);
+    writeFileSync(file, stored);
+    await broadcast();
+    expect(log()).toContain("2 of 2 stored push subscriptions are skipped");
+    await Promise.all([broadcast(), broadcast(), broadcast()]);
+    expect(log().split(warning).length - 1).toBe(1);
+    expect(log()).not.toContain(endpoint);
+    expect(log()).not.toContain("relay.example.org");
+    expect(log()).not.toContain("invented-private-token");
+    expect(readFileSync(file, "utf8")).toBe(stored);
   });
 });
 

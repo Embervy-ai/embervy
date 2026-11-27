@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { dirname, join } from "node:path";
 import { ALIASES } from "./aliases";
 import { appMcpServer, toolCallSpeech } from "./app-channel";
+import { houseRoomNames } from "./house-rooms";
 
 export function toolOutreachDelivered(result: unknown): boolean {
   const text = typeof result === "string" ? result : Array.isArray(result)
@@ -222,7 +223,9 @@ export function isScheduledTurn(prompt: string): boolean {
 
 export function roomUserSpeaker(content: string, fallback: string): string {
   const text = content.match(/<channel\b[^>]*>([\s\S]*?)<\/channel>/)?.[1] ?? content;
-  return text.trim().match(/^\[([^\]/\r\n]+)\/([^\]/\r\n]+)\]/)?.[2].trim() || fallback;
+  const prefix = text.trim().match(/^\[([^\]/\r\n]+)\/([^\]/\r\n]+)\]/);
+  if (!prefix || (prefix[1] !== "Direct" && !houseRoomNames().has(prefix[1]))) return fallback;
+  return prefix[2].trim() || fallback;
 }
 
 export type TurnLine = [speaker: string, text: string, ts?: string, display?: { day?: string; time: string }];

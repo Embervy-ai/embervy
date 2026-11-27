@@ -139,6 +139,80 @@ describe("inbound export parity", () => {
   });
 });
 
+describe("room list archive regression", () => {
+  for (const source of ["environment", "house-file", "malformed"] as const) test(`room list reaches archive speakers from ${source}`, () => {
+    const root = mkdtempSync(join(tmpdir(), "archive-room-list-"));
+    roots.push(root);
+    const session = join(root, "session.jsonl"), archive = join(root, "archive.md");
+    const texts = ["[Studio/Robin] hello", "[Gallery/Alex] hi", "[Draft/2] x", "[Direct/Peer] private", "[Room/Robin] hi"];
+    writeFileSync(session, texts.map(content => JSON.stringify({
+      type: "user", timestamp: "2026-10-02T06:00:00Z", message: { role: "user", content },
+    })).join("\n"));
+    const rooms = JSON.stringify([{ name: " Studio! " }, {}, { name: "Gallery" }]);
+    if (source === "house-file") writeFileSync(join(root, ".env"), `EMBERVY_ROOMS='${rooms}'\n`);
+    const env = { PATH: process.env.PATH!, HOME: root, EMBERVY_HOME: root, SESSION_FILE: session,
+      USER_LABEL: "Owner", EMBERVY_TIMEZONE: "UTC", RAG_URL: "http://rag.invalid", DRY_RUN: "1", DRY_OUT: archive,
+      ...(source === "house-file" ? {} : { EMBERVY_ROOMS: source === "malformed" ? "{broken" : rooms }) };
+    const run = Bun.spawnSync(["bash", script, "Session_1", "1"], { env, stdout: "pipe", stderr: "pipe" });
+    expect(run.exitCode).toBe(0);
+    const output = readFileSync(archive, "utf8");
+    const pairs = [...output.matchAll(/\*\*([^*]+)\*\*(?: · \d{2}:\d{2})?\n\n([\s\S]*?)(?=\n+---\n|$)/g)]
+      .map(match => [match[1], match[2].trimEnd()]);
+    expect(pairs).toEqual(texts.map((text, index) => [
+      (source === "malformed" ? ["Owner", "Owner", "Owner", "Peer", "Owner"] : ["Robin", "Alex", "Owner", "Peer", "Robin"])[index], text,
+    ]));
+  });
+});
+
+describe("room list archive regression: default name", () => {
+  const url = "https://room.example.test/private-url-canary-72491";
+  const cases = [
+    { label: "URL only in house env", file: `EMBERVY_ROOM_URL=${url}`, expected: "Robin" },
+    { label: "URL in environment", file: "", url, expected: "Robin" },
+    { label: "blank name in house env", file: `EMBERVY_ROOM_URL='${url}'\nEMBERVY_ROOM_NAME='  '`, expected: "Robin" },
+    { label: "token without URL", file: "", expected: "Owner" },
+    { label: "empty quoted URL", file: "EMBERVY_ROOM_URL=''", expected: "Owner" },
+    { label: "whitespace URL", file: "EMBERVY_ROOM_URL='  '", expected: "Owner" },
+    { label: "comment without URL", file: "EMBERVY_ROOM_URL= # absent", expected: "Owner" },
+    { label: "empty environment overrides file URL", file: `EMBERVY_ROOM_URL=${url}`, url: "", expected: "Owner" },
+    { label: "environment URL overrides empty file", file: "EMBERVY_ROOM_URL=", url, expected: "Robin" },
+  ];
+  for (const item of cases) test(item.label, () => {
+    const root = mkdtempSync(join(tmpdir(), "archive-default-room-"));
+    roots.push(root);
+    const bin = join(root, "bin"), audit = join(root, "python-env.jsonl");
+    mkdirSync(bin);
+    const python = Bun.which("python3")!;
+    // Observe actual Python child environments, not just the shell source.
+    writeFileSync(join(bin, "python3"), `#!${python}
+import json, os, sys
+with open(${JSON.stringify(audit)}, 'a') as output:
+    output.write(json.dumps(dict(os.environ)) + '\\n')
+os.execv(${JSON.stringify(python)}, [${JSON.stringify(python)}] + sys.argv[1:])
+`, { mode: 0o755 });
+    writeFileSync(join(root, ".env"), `${item.file}\nEMBERVY_ROOM_TOKEN=${"t".repeat(32)}\n`);
+    const session = join(root, "session.jsonl"), archive = join(root, "archive.md");
+    writeFileSync(session, JSON.stringify({ type: "user", timestamp: "2026-10-02T06:00:00Z",
+      message: { role: "user", content: "[Room/Robin] hi" } }));
+    const run = Bun.spawnSync(["bash", script, "Session_1", "1"], { env: {
+      PATH: `${bin}:${process.env.PATH}`, HOME: root, EMBERVY_HOME: root, SESSION_FILE: session,
+      USER_LABEL: "Owner", EMBERVY_TIMEZONE: "UTC", RAG_URL: "http://rag.invalid", DRY_RUN: "1", DRY_OUT: archive,
+      ...("url" in item ? { EMBERVY_ROOM_URL: item.url } : {}),
+    }, stdout: "pipe", stderr: "pipe" });
+    expect(run.exitCode).toBe(0);
+    const output = readFileSync(archive, "utf8");
+    expect(output).toMatch(new RegExp(`\\*\\*${item.expected}\\*\\*(?: · \\d{2}:\\d{2})?\\n\\n\\[Room/Robin\\] hi`));
+    const environments = readFileSync(audit, "utf8");
+    expect(output + environments + run.stdout.toString() + run.stderr.toString()).not.toContain(url);
+    const rows = environments.trim().split("\n").map(line => JSON.parse(line));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const env of rows) {
+      expect(env.EMBERVY_ROOM_URL).toBeUndefined();
+      expect(env._TRANSCRIPT_ROOM_URL_PRESENT).toBe(item.expected === "Robin" ? "1" : "");
+    }
+  });
+});
+
 const FAKE_CURL = `#!/usr/bin/env python3
 import os, sys
 args = sys.argv[1:]
@@ -248,7 +322,12 @@ test.skipIf(!("roomUserSpeaker" in (await import("../../Brain/wake-bridge"))))("
   const { historyToMarkdown, extractBridge, userLineSpeaker } = await import("../../Brain/brain");
   const { nativeMessages } = await import("../../Brain/wake-bridge");
   const rules = { userName: "Person", workerName: "Agent", systemLine: /^system:/, scheduledLine: /^scheduled:/ };
-  for (const [body, speaker] of [["[Support/Robin] hello", "Robin"], ["[Support/Person] hello", "Person"], ["normal app turn", "Person"], ["[Email from sender@example.test] mail", "Person"]]) {
+  // Only the house's configured room names a speaker; any other leading [X/Y] is ordinary text.
+  const savedRooms = [process.env.EMBERVY_ROOM_NAME, process.env.ROOM_NAME];
+  process.env.EMBERVY_ROOM_NAME = "Support";
+  delete process.env.ROOM_NAME;
+  try {
+  for (const [body, speaker] of [["[Support/Robin] hello", "Robin"], ["[Support/Person] hello", "Person"], ["[Direct/Robin] hello", "Robin"], ["[Draft/2] like this please", "Person"], ["normal app turn", "Person"], ["[Email from sender@example.test] mail", "Person"]]) {
     const content = `<channel>${body}</channel>`;
     const history = [{ role: "user" as const, content }];
     expect(userLineSpeaker(content, "Person")).toBe(speaker);
@@ -258,6 +337,11 @@ test.skipIf(!("roomUserSpeaker" in (await import("../../Brain/wake-bridge"))))("
       expect(output).toContain(`**${userLineSpeaker(content)}**`);
     }
     expect(history[0].content).toBe(content);
+  }
+  } finally {
+    for (const [key, value] of [["EMBERVY_ROOM_NAME", savedRooms[0]], ["ROOM_NAME", savedRooms[1]]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
   }
 });
 

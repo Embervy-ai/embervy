@@ -25,10 +25,16 @@ for (const key of ["EMBERVY_HOME", "INTERNAL_API_TOKEN", "OPENROUTER_API_KEY", "
   delete process.env[key];
 }
 process.env.BRAIN_NO_ENV_FILE = "1";
+// Read-only room-name discovery must also stay inside the disposable house.
+process.env.EMBERVY_HOME = root;
 // The suite's fixtures use the product app server name and a fixed clock place.
 // The product defaults (app, the zone's own city) are tested explicitly.
 process.env.BRAIN_APP_MCP_SERVER = "app";
 process.env.BRAIN_CLOCK_PLACE = "Berlin";
+// The existing fresh-zone fixture receives [Workshop/Peer]. Like a real house,
+// the isolated test house must name its room; this is not a product default.
+process.env.EMBERVY_ROOM_NAME = "Workshop";
+delete process.env.ROOM_NAME;
 // The product texts are English.
 process.env.BRAIN_LANG = "en";
 // No house language file leaks in; local-strings.test.ts writes its own.

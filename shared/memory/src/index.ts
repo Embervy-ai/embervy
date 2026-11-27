@@ -10,7 +10,7 @@ import { envValue, MEMORY_IMAGE_PATH, MEMORY_VIDEO_PATH } from "../../scripts/le
 
 const MEMORY_VERSION = "0.3.0";
 // Kept in sync with the root VERSION by product-guards.test.ts.
-export const PRODUCT_VERSION = "1.0.5";
+export const PRODUCT_VERSION = "1.0.6";
 
 
 export interface Env {

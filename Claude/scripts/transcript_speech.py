@@ -6,6 +6,42 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import unicodedata
+
+
+# Match roomConfig's Unicode letter/number filter and JavaScript string limit.
+_JS_WHITESPACE = " \t\n\r\v\f\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+def clean_room_name(value):
+    if not isinstance(value, str) or not value.strip(_JS_WHITESPACE):
+        return None
+    name = ''.join(c for c in value if c in ' _-' or unicodedata.category(c)[0] in 'LN').strip()
+    return name.encode('utf-16-le', errors='surrogatepass')[:80].decode('utf-16-le', errors='surrogatepass') or 'Room'
+
+
+def house_room_names(env=None):
+    """Read names and the internal shell handoff bit.
+
+    EMBERVY_ROOMS is parsed as a whole, including any connection fields, but
+    only cleaned room names are retained; standalone URLs and tokens are not read.
+    """
+    if env is None:
+        env = os.environ
+    single = clean_room_name(env.get('EMBERVY_ROOM_NAME'))
+    # The shell supplies only 1 or empty, not a house configuration knob. Like
+    # Brain, do not validate URLs or tokens: an extra foreign name is safer than
+    # assigning foreign speech to the person.
+    if single is None and env.get('_TRANSCRIPT_ROOM_URL_PRESENT') == '1':
+        single = 'Room'
+    names = {single, clean_room_name(env.get('ROOM_NAME'))}
+    try:
+        rooms = json.loads(env.get('EMBERVY_ROOMS', ''))
+    except (ValueError, TypeError):
+        rooms = []
+    if isinstance(rooms, list):
+        names.update(clean_room_name(room.get('name')) or 'Room' for room in rooms if isinstance(room, dict))
+    return names - {None}
 
 
 def is_room_tool(name):
@@ -79,7 +115,7 @@ def user_speech(entry, user_label=None, room_names=None):
     if user_label is None:
         user_label = os.environ.get('USER_LABEL', 'User')
     if room_names is None:
-        room_names = {os.environ.get(key, '').strip() for key in ('EMBERVY_ROOM_NAME', 'ROOM_NAME')} - {''}
+        room_names = house_room_names()
     content = strip_transcript_tags(content)
     bodies = []
     depth = 0

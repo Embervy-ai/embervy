@@ -1,6 +1,14 @@
 #!/bin/bash
 # Exports a session transcript to the archive with a generated header.
 
+# Keep the house setting EMBERVY_ROOM_URL out of child environments. The
+# following _TRANSCRIPT_ROOM_URL_PRESENT is an internal transcript handoff,
+# retaining only URL presence (explicit env wins), not a house setting.
+export -n EMBERVY_ROOM_URL
+_TRANSCRIPT_ROOM_URL_PRESENT=""
+_transcript_room_url_set="${EMBERVY_ROOM_URL+x}"
+[[ ${EMBERVY_ROOM_URL:-} =~ [^[:space:]] ]] && _TRANSCRIPT_ROOM_URL_PRESENT=1
+
 ENV_LIB="$(dirname -- "${BASH_SOURCE[0]}")/../../shared/scripts/env-file.sh"
 [ -f "$ENV_LIB" ] || ENV_LIB="${EMBERVY_HOME:-/opt/embervy}/shared/scripts/env-file.sh"
 . "$ENV_LIB"
@@ -13,6 +21,13 @@ AGENT_LABEL="${AGENT_LABEL:-${SYNTH_LABEL:-Agent}}"
 SPLIT_THRESHOLD="${SPLIT_THRESHOLD:-81920}"
 
 embervy_env_load "$EMBERVY_HOME/.env"
+
+if [[ -z $_transcript_room_url_set ]]; then
+  _TRANSCRIPT_ROOM_URL_PRESENT=""
+  [[ ${EMBERVY_ROOM_URL:-} =~ [^[:space:]] ]] && _TRANSCRIPT_ROOM_URL_PRESENT=1
+fi
+unset EMBERVY_ROOM_URL _transcript_room_url_set
+export _TRANSCRIPT_ROOM_URL_PRESENT
 
 if [ -z "${RAG_URL:-}" ]; then
   echo "RAG_URL is not set" >&2
@@ -118,7 +133,7 @@ TMPDIR=$(mktemp -d) || exit 1
 trap 'rm -rf -- "$TMPDIR"' EXIT
 
 export SESSION_FILE NAME SESSION_NUM TMPDIR USER_LABEL AGENT_LABEL
-export EMBERVY_ROOM_NAME ROOM_NAME
+export EMBERVY_ROOM_NAME ROOM_NAME EMBERVY_ROOMS
 export BRAIN_TIMEZONE EMBERVY_TIMEZONE
 
 python3 - "$(dirname -- "${BASH_SOURCE[0]}")" << 'PYEOF'

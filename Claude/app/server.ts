@@ -436,7 +436,8 @@ if (VAPID_PUBLIC && VAPID_PRIVATE) {
 
 function loadSubscriptions(): any[] {
   try {
-    return JSON.parse(readFileSync(PUSH_SUBS_FILE, "utf8"));
+    const subs = JSON.parse(readFileSync(PUSH_SUBS_FILE, "utf8"));
+    return Array.isArray(subs) ? subs : [];
   } catch {
     return [];
   }
@@ -447,20 +448,26 @@ function saveSubscriptions(subs: any[]) {
   renameSync(`${PUSH_SUBS_FILE}.tmp`, PUSH_SUBS_FILE);
 }
 
+let warnedSkippedPushSubscriptions = false;
 async function sendPushToAll(title: string, body: string) {
   const subs = loadSubscriptions();
+  const accepted = subs.filter(sub => acceptedPushEndpoint(sub?.endpoint));
+  const skipped = subs.length - accepted.length;
+  if (skipped > 0 && !warnedSkippedPushSubscriptions) {
+    warnedSkippedPushSubscriptions = true;
+    process.stderr.write(`embervy-app: ${skipped} of ${subs.length} stored push subscriptions are skipped by the push endpoint policy\n`);
+  }
   const dead = new Set<string>();
 
-  for (let i = 0; i < subs.length; i++) {
-    if (!acceptedPushEndpoint(subs[i]?.endpoint)) continue;
+  for (const sub of accepted) {
     try {
       await webpush.sendNotification(
-        subs[i],
+        sub,
         JSON.stringify({ title, body: body.slice(0, 200) })
       );
     } catch (err: any) {
       if (err?.statusCode === 410 || err?.statusCode === 404) {
-        dead.add(subs[i].endpoint);
+        dead.add(sub.endpoint);
       } else {
         process.stderr.write(`embervy-app: push error: ${err}\n`);
       }

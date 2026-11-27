@@ -26,6 +26,8 @@ EMBERVY_ROOM_TOKEN=<the member key, at least 32 characters>
 EMBERVY_ROOM_NAME=Support
 ```
 
+For a manually configured house whose app reads only `Claude/app/.env`, put these lines there instead; Brain reads both settings files, with the house `.env` taking precedence per key.
+
 Read the house's `EMBERVY_APP_SERVICE` from `$EMBERVY_HOME/.env` into your
 terminal environment (the first-house example is `embervy-app`; a named
 house uses `embervy-<name>-app`). Then run

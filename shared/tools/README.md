@@ -43,6 +43,7 @@ old setting names are read when the current ones are not set.
 | Health | Disk space | used % on `/` and `$EMBERVY_HOME` — `WARN` from 80 %, `FAIL` from 92 %; the fix names the disk reserve `/var/lib/embervy/reserve.img` first when it exists |
 | Health | Swap | some swap is active (`WARN` when none — a memory spike then kills processes) |
 | Health | No dangerous defaults | no trivial passwords, no `YOUR_` placeholders |
+| Health | Push subscriptions | counts stored subscriptions the app would skip; warns without exposing endpoints or hosts, using `EMBERVY_PUSH_RELAY_HOSTS` and `EMBERVY_APP_DATA_DIR` from the app settings; absent app layers skip |
 
 **Status levels:** `OK` (passed), `WARN` (passed but worth a look), `FAIL` (broken),
 `SKIP` (intentionally not run, e.g. `--offline` or feature not configured).
@@ -67,15 +68,15 @@ line for the full picture.
 All via env. Loaded in order:
 
 1. `$EMBERVY_HOME/.env`
-2. `$EMBERVY_HOME/app/.env`
-3. `$APP_ENV_FILE` (if set)
-4. `process.env` (fallback)
+2. `$APP_ENV_FILE`, or `$EMBERVY_HOME/Claude/app/.env` by default
+3. `process.env` (fallback)
 
-**Earlier-loaded `.env` values win** — once a key is set, later sources
-do not override it. `APP_ENV_FILE` therefore *adds* substrate-specific
-values for keys not already present in the main `.env`. For temporary
-overrides during a single run, edit the `.env` or wrap the call in a
-one-off shell scope.
+**Earlier-loaded `.env` values win** for general house settings. For app
+checks (password protection and push subscriptions), app-local assignments
+instead take precedence over the house `.env`, including explicitly empty
+values. `APP_ENV_FILE` replaces the default app env file. Push subscriptions
+are read from `EMBERVY_APP_DATA_DIR` or `Claude/app/data`; relative data
+directories resolve from `Claude/app`, the app service's working directory.
 
 **Required for online checks:**
 
@@ -87,7 +88,7 @@ one-off shell scope.
 **Optional:**
 
 - `EMBERVY_HOME` — your stack root (default: current dir)
-- `APP_ENV_FILE` — extra .env to load (e.g. `Claude/app/.env`)
+- `APP_ENV_FILE` — alternative app .env (default: `Claude/app/.env`)
 - `OPENROUTER_API_KEY` — optional inlet classifier key; when set, the full and
   startup checks validate it without generating a completion or printing its value
 - `INLET_SCRIPT` — path to your inlet worker (default:

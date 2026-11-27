@@ -675,6 +675,36 @@
     }
   }
 
+  // iOS stores text starting like a URL scheme, such as "Subject: …", as a
+  // percent-encoded URL when copied through the clipboard API. Copying from a
+  // selected field keeps it plain text, so use the API only as a fallback.
+  async function copyPlainText(text, host) {
+    const previousFocus = document.activeElement;
+    let area;
+    let copied = false;
+    try {
+      area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.cssText = "position:fixed;top:-1000px;opacity:0";
+      (host || document.body).appendChild(area);
+      area.select();
+      area.setSelectionRange(0, text.length);
+      copied = document.execCommand("copy");
+    } catch {} finally {
+      area?.remove();
+      try { previousFocus?.focus({ preventScroll: true }); } catch {}
+    }
+    if (copied) return true;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
   const messagesEl = document.getElementById("messages");
   messagesEl.addEventListener("click", (ev) => {
     const quote = ev.target instanceof Element ? ev.target.closest(".msg-quote[data-jump]") : null;
@@ -689,16 +719,7 @@
       btn.classList.toggle("done", ok);
       setTimeout(() => { btn.textContent = t("chat.copybox.copy"); btn.classList.remove("done"); }, 1600);
     };
-    // Older browsers and some installed web apps have no clipboard API: copy through a hidden field.
-    const fallback = () => {
-      const area = document.createElement("textarea");
-      area.value = text; area.setAttribute("readonly", ""); area.style.cssText = "position:fixed;top:-1000px;opacity:0";
-      (btn.closest("dialog") || document.body).appendChild(area); area.select();
-      let ok = false; try { ok = document.execCommand("copy"); } catch {}
-      area.remove(); done(ok);
-    };
-    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => done(true), fallback);
-    else fallback();
+    copyPlainText(text, btn.closest("dialog")).then(done);
   });
 
   // Tapping a chat image opens it full screen with a save button: an installed
@@ -2120,7 +2141,7 @@
     const div = document.querySelector(`[data-msg-id="${msgId}"]`);
     if (!div) return;
     const text = (div._rawText && div._rawText.trim()) || messageSnippetFull(div);
-    navigator.clipboard?.writeText(text).catch(() => {});
+    void copyPlainText(text);
   };
 
   window.enableSelect = function(msgId) {

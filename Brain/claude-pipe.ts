@@ -134,9 +134,31 @@ export interface PipeUsageSample extends UsageTokens {
 }
 export const UNKNOWN_MODEL = "unknown";
 export const usageNumber = (n: unknown): number | null => typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
+function promptSplit(u: any): { input: number; read: number; write: number; total: number } | null {
+  const input = usageNumber(u?.input_tokens);
+  if (input === null) return null;
+  const read = u.cache_read_input_tokens === undefined ? 0 : usageNumber(u.cache_read_input_tokens);
+  const write = u.cache_creation_input_tokens === undefined ? 0 : usageNumber(u.cache_creation_input_tokens);
+  if (read === null || write === null) return null;
+  return { input, read, write, total: input + read + write };
+}
 /** max keeps a late or duplicate older mirror from rolling back a delta. */
 export function mergeMessageUsage(target: Record<string, any>, usage: any): void {
   if (!usage || typeof usage !== "object") return;
+  // A provider may open a message with a provisional prompt count (everything as
+  // input, no cache split) and report the billed split later. Same prompt total,
+  // different split: the split with the larger cached part is the final one,
+  // whichever event arrives first. Unequal totals keep the max rule below.
+  const have = promptSplit(target), next = promptSplit(usage);
+  if (have && next && have.total === next.total && have.total > 0 && have.input !== next.input) {
+    const final = next.input < have.input ? next : have;
+    target.input_tokens = final.input;
+    target.cache_read_input_tokens = final.read;
+    target.cache_creation_input_tokens = final.write;
+    const out = usageNumber(usage.output_tokens);
+    if (out !== null) target.output_tokens = Math.max(target.output_tokens ?? 0, out);
+    return;
+  }
   for (const field of ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]) {
     const n = usageNumber(usage[field]);
     if (n !== null) target[field] = Math.max(target[field] ?? 0, n);

@@ -118,9 +118,14 @@ export class LiveTurnTokens {
         return true;
       }
       if (se.type === "message_delta") {
-        const real = outputTokens(se.usage);
-        if (real === null) return false;
         const entry = this.entry(scope, id);
+        // The start count may be provisional (all input, no cache split); a delta with
+        // the same prompt total and a smaller uncached part carries the billed split.
+        const final = promptUsage(se.usage);
+        const resplit = Boolean(final && entry.prompt !== null && final.prompt === entry.prompt && final.coldIn < entry.coldIn);
+        if (resplit) entry.coldIn = final!.coldIn;
+        const real = outputTokens(se.usage);
+        if (real === null) return resplit;
         entry.real = Math.max(entry.real ?? 0, real);
         entry.final = true;
         return true;

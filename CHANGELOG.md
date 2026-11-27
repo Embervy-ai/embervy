@@ -2,6 +2,21 @@
 
 Embervy uses [semantic versioning](https://semver.org/). The current version is in `VERSION`. Installed houses receive updates as letters, and every letter names the changes it carries.
 
+## 1.0.6 (2026-11-27)
+
+### App
+
+- On iPhone, copying text that began with a word and a colon, such as `Subject: a b`, could paste percent-encoded text into Mail or Notes. Copy boxes, message actions and kept messages now copy from a selected read-only field first, preserving plain text and returning focus to the previous control. The clipboard API is used only if copying from the field fails.
+
+### Brain
+
+- Brain takes a leading `[Room/Speaker]` prefix as a speaker name only for the house's configured rooms (`EMBERVY_ROOM_NAME`, `ROOM_NAME`, `EMBERVY_ROOMS`) and for `Direct`, the same rule as in Claude Code houses. Before, any message that began with bracketed text containing a slash, such as `[Draft/2]`, was filed in the bridge and the archive under a speaker called `2`. Brain reads room names from the house settings and the app's own settings file, including the room list, with its own environment taking precedence, including the app's default `Room` for unnamed configured rooms.
+- Brain counts a model step correctly when the engine opens a streamed message with a provisional prompt count and reports the final split between new and cached input at the end. Before, the provisional count stayed next to the final cached count: the context watchdog counted the prompt twice and would cut at about half the window, and the status line showed every step as uncached. Seen with the Kimi model `k3`; `kimi-for-coding` and `k3.1-pro` report the split from the start and were not affected.
+
+### Doctor
+
+- A new check, "Push subscriptions", counts the stored push subscriptions the app skips because their host is neither a browser push service nor named in `EMBERVY_PUSH_RELAY_HOSTS`, and warns when there are any. Before, such a subscription was skipped at every message with no log line and a green doctor, so a house could go silent for its person unnoticed. The check and the app's new log line (once per start) give counts only, never an address or a host.
+
 ## 1.0.5 (2026-11-25)
 
 ### App

@@ -1254,6 +1254,58 @@ function checkReboot() {
   add({ ...base, status: "OK", detail });
 }
 
+// App-local assignments are authoritative, including an explicitly empty value.
+// The root template may contain blank app-only keys without configuring the app.
+function appValue(name: string): string {
+  const key = AGENT_PREFIX && appEnv[`${AGENT_PREFIX}_${name}`] !== undefined
+    ? `${AGENT_PREFIX}_${name}` : name;
+  return appEnv[key] !== undefined ? appEnv[key] : readEnv(name);
+}
+
+async function checkPushSubscriptions(appPresent: boolean) {
+  const base = { id: "health.push_subscriptions", group: "Health", label: "Push subscriptions" };
+  if (!appPresent) {
+    add({ ...base, status: "SKIP", detail: "not checked — no app layer installed or running" });
+    return;
+  }
+  // Relative data directories follow the app service's working directory, not the doctor's.
+  const appDir = resolve(EMBERVY_HOME, "Claude/app");
+  const file = resolve(appDir, appValue("EMBERVY_APP_DATA_DIR") || "data", "push-subscriptions.json");
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error: any) {
+    if (error?.code === "ENOENT") {
+      add({ ...base, status: "OK", detail: "0 stored push subscriptions; no subscription file" });
+    } else {
+      // File paths and parser errors may contain subscription secrets; never include them.
+      add({ ...base, status: "WARN", detail: "Push subscription file is unreadable",
+        fix: "Check access to push-subscriptions.json in the app data directory." });
+    }
+    return;
+  }
+  let subs: unknown;
+  try { subs = JSON.parse(text); } catch {
+    add({ ...base, status: "WARN", detail: "Push subscription file is not valid JSON",
+      fix: "Repair or remove push-subscriptions.json in the app data directory." });
+    return;
+  }
+  if (!Array.isArray(subs)) {
+    add({ ...base, status: "WARN", detail: "Push subscription file is not a JSON array",
+      fix: "Repair or remove push-subscriptions.json in the app data directory." });
+    return;
+  }
+  // Keep app-free houses and the lightweight startup doctor independent of app modules.
+  const { acceptedPushEndpoint, pushRelayHosts } = await import("../../Claude/app/push-endpoint");
+  const relayHosts = pushRelayHosts(appValue("EMBERVY_PUSH_RELAY_HOSTS"));
+  const skipped = subs.filter(sub => !acceptedPushEndpoint(sub?.endpoint, relayHosts)).length;
+  add({ ...base, status: skipped ? "WARN" : "OK",
+    detail: skipped
+      ? `${skipped} of ${subs.length} stored push subscriptions are skipped: their host is not a browser push service and not named in EMBERVY_PUSH_RELAY_HOSTS`
+      : `${subs.length} stored push subscriptions; 0 skipped`,
+    ...(skipped ? { fix: "Add the relay host to EMBERVY_PUSH_RELAY_HOSTS in the app settings and restart the app, or remove the skipped subscription." } : {}) });
+}
+
 async function checkDangerousDefaults() {
   type Sub = { label: string; ok: boolean; failDetail?: string; fix?: string };
   const subs: Sub[] = [];
@@ -1264,13 +1316,6 @@ async function checkDangerousDefaults() {
     failDetail: "RAG_AUTH_TOKEN missing — RAG fails closed but other components break",
   });
 
-  // App-local assignments are authoritative, including an explicitly empty value.
-  // The root template may contain blank app-only keys without configuring the app.
-  const appValue = (name: string) => {
-    const key = AGENT_PREFIX && appEnv[`${AGENT_PREFIX}_${name}`] !== undefined
-      ? `${AGENT_PREFIX}_${name}` : name;
-    return appEnv[key] !== undefined ? appEnv[key] : readEnv(name);
-  };
   const APP_PASSWORD = appValue("APP_PASSWORD");
   const APP_SESSION_SECRET = appValue("APP_SESSION_SECRET");
 
@@ -1289,6 +1334,8 @@ async function checkDangerousDefaults() {
     answers = response.status > 0;
   } catch (error: any) { probeFailed = error.message || String(error); }
   const installed = /^LoadState=loaded$/m.test(serviceState) || existsSync(`${EMBERVY_HOME}/Claude/app/server.ts`);
+  // Reuse the app password check's installation and listener detection.
+  await checkPushSubscriptions(installed || active || answers);
   if (!APP_PASSWORD && (active || answers)) {
     subs.push({ label: "APP_PASSWORD set", ok: false,
       failDetail: "APP_PASSWORD is empty while the house app is running",

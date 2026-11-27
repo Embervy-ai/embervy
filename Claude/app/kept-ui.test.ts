@@ -402,7 +402,9 @@ test("the detail view uses chat Markdown and the existing copy handler without l
   expect(detail).toContain('copy._copyText = entry.text');
   expect(detail).toContain('copyButton.className = "copybox-btn"');
   expect(source).toContain('btn.closest("#messages, #kept-dialog")');
-  expect(source).toContain('(btn.closest("dialog") || document.body).appendChild(area)');
+  // Dialog hosting uses the shared helper.
+  expect(source).toContain('copyPlainText(text, btn.closest("dialog")).then(done)');
+  expect(section("  async function copyPlainText(", "  const messagesEl =")).toContain('(host || document.body).appendChild(area)');
   expect(detail).not.toContain('data-msg-id');
   expect(detail).toContain('audio.controls = true');
   expect(detail).toContain('audio.preload = "none"');
